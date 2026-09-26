@@ -159,6 +159,7 @@ function rayCircle(ox, oy, dx, dy, cx, cy, r) {
 // Cars
 // ---------------------------------------------------------------------------
 const CAR_L = 22, CAR_W = 11;
+const CLOSE_CALL = 10;   // px of clearance below which a pass counts as a close call
 const MAX_SPEED = 280, ACCEL = 240, BRAKE = 520, DRAG = 0.3, STEER_RATE = 3.0;
 const RAY_ANGLES = [-90, -55, -30, -12, 0, 12, 30, 55, 90].map(d => d * Math.PI / 180);
 const NUM_RAYS = RAY_ANGLES.length;
@@ -355,7 +356,7 @@ class Simulation {
     }
     if (edge > tr.hw) return this.kill(car, 'crashed', 'hit the barrier');
     const margin = tr.hw - edge;
-    if (margin < 6) car.nearMiss += dt * 0.5 * (1 - margin / 6);
+    if (margin < 4) car.nearMiss += dt * 0.5 * (1 - margin / 4);
 
     // --- Collisions with obstacles
     for (let k = 0; k < near.length; k++) {
@@ -369,7 +370,8 @@ class Simulation {
         const what = o.type === 'ped' ? 'hit a pedestrian' : o.type === 'traffic' ? 'hit another car' : 'hit an obstacle';
         return this.kill(car, 'crashed', what);
       }
-      if (dist < o.r + 16) car.nearMiss += dt * (1 - (dist - o.r) / 16) * (o.type === 'ped' ? 3 : 1.5);
+      // Close-call zone is small enough that even the narrowest road leaves a clean line past every hazard.
+      if (dist < o.r + CLOSE_CALL) car.nearMiss += dt * (1 - (dist - o.r) / CLOSE_CALL) * (o.type === 'ped' ? 3 : 1.5);
     }
 
     // --- Rules of the exam
@@ -403,11 +405,11 @@ class Simulation {
     car.penalty = penalty;
     car.safety = 100 * completion * penalty * mul;
     let fit = dist;
-    if (car.status === 'finished') fit += target * (0.5 + 0.3 * (1 - car.finishTime / this.timeLimit));
+    if (car.status === 'finished') fit += target * (0.5 + 0.15 * (1 - car.finishTime / this.timeLimit));
     // Stopping forever in front of a hazard is no better than hitting it —
     // otherwise "park and wait" becomes a trap evolution can't escape.
     const fail = car.status === 'crashed' || car.status === 'wrong-way' || car.status === 'stalled';
-    car.fitness = fit * Math.pow(penalty, 1.5) * (fail ? 0.5 : 1);
+    car.fitness = fit * penalty * penalty * (fail ? 0.5 : 1);
   }
 
   endGeneration() {
