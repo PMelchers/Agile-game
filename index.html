@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoPilot Academy</title>
+  <meta name="description" content="Train self-driving AI cars in a 2D world. They learn from their crashes through neuroevolution and earn higher safety scores, with endless difficulty levels.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="stage" aria-label="Simulation">
+      <canvas id="world"></canvas>
+      <div class="hud" id="hud" aria-live="polite"></div>
+      <div class="toast" id="toast" hidden></div>
+      <div class="stage-controls">
+        <button id="btnPause" class="btn" title="Pause / play (Space)">Pause</button>
+        <div class="seg" id="speedSeg" role="group" aria-label="Simulation speed">
+          <button data-speed="1">1×</button>
+          <button data-speed="3">3×</button>
+          <button data-speed="10">10×</button>
+          <button data-speed="30">30×</button>
+          <button data-speed="max">Max</button>
+        </div>
+        <button id="btnCam" class="btn" title="Toggle camera (C)">Overview</button>
+        <button id="btnSensors" class="btn" aria-pressed="true" title="Toggle sensor rays (S)">Sensors</button>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <header class="brand">
+        <h1>AutoPilot Academy</h1>
+        <p>Every car is driven by a tiny neural network. The ones that drive furthest and safest become the parents of the next generation, so the fleet learns from every crash.</p>
+      </header>
+
+      <div class="stats" id="stats"></div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Safety score by generation</h2>
+          <div class="legend"><span><i class="sw s1"></i>Best car</span><span><i class="sw s2"></i>Fleet avg</span><span><i class="sw dash"></i>Pass mark</span></div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart"></canvas>
+          <div class="tooltip" id="chartTip" hidden></div>
+        </div>
+        <ol class="log" id="log"></ol>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Difficulty</h2>
+          <div class="stepper big">
+            <button id="lvlDown" aria-label="Lower level">−</button>
+            <span>Level <b id="lvl">1</b></span>
+            <button id="lvlUp" aria-label="Raise level">+</button>
+          </div>
+        </div>
+        <label class="row check"><input type="checkbox" id="autoAdv" checked> Level up automatically when the best car finishes with safety ≥ <b id="thrVal">75</b></label>
+        <input type="range" id="thr" min="40" max="99" value="75" aria-label="Pass mark">
+        <label class="row check"><input type="checkbox" id="newEach"> New random track every generation (harder, but they generalise better)</label>
+        <p class="hint">There is no top level. Every hazard below keeps getting harder, and you can stack extra on any one of them.</p>
+        <div class="factors" id="factors"></div>
+        <button id="btnNewTrack" class="btn wide">New track (N)</button>
+      </section>
+
+      <section class="card">
+        <h2>Training</h2>
+        <label class="slider">Population <b id="popVal"></b><input type="range" id="pop" min="20" max="400" step="10"></label>
+        <label class="slider">Mutation rate <b id="mrVal"></b><input type="range" id="mr" min="0.01" max="0.4" step="0.01"></label>
+        <label class="slider">Mutation strength <b id="msVal"></b><input type="range" id="ms" min="0.05" max="1.2" step="0.05"></label>
+        <p class="hint" id="boostHint"></p>
+        <div class="btn-row">
+          <button id="btnExport" class="btn">Export brain</button>
+          <label class="btn file">Import brain<input type="file" id="fileImport" accept="application/json,.json" hidden></label>
+        </div>
+        <div class="btn-row">
+          <button id="btnResetBrains" class="btn danger">Forget everything</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Leader's brain (live)</h2>
+        <canvas id="brain"></canvas>
+        <p class="hint">Inputs on the left: 9 distance sensors plus speed, lane position, heading and upcoming bend. Blue is positive, orange is negative.</p>
+      </section>
+
+      <footer class="keys">Space pause · 1–5 speed · C camera · S sensors · N new track · scroll to zoom</footer>
+    </aside>
+  </main>
+
+  <script src="js/util.js"></script>
+  <script src="js/nn.js"></script>
+  <script src="js/track.js"></script>
+  <script src="js/sim.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
