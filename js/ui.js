@@ -206,22 +206,27 @@ document.addEventListener('keydown', e => {
   else if ('12345'.includes(k) && k.length === 1) setSpeed([1, 3, 10, 30, 'max'][+k - 1]);
 });
 
+// Export copies the brain to the clipboard (works everywhere) and also offers a
+// file download where the browser allows one.
 $('btnExport').addEventListener('click', () => {
   const brain = sim.champion ? sim.champion.brain : sim.leader().brain;
-  const blob = new Blob([JSON.stringify({ app: 'autopilot-academy', level: sim.level, safety: sim.champion ? sim.champion.safety : null, brain: brain.toJSON() })], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `autopilot-brain-level${sim.level}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  const json = JSON.stringify({ app: 'autopilot-academy', level: sim.level, safety: sim.champion ? sim.champion.safety : null, brain: brain.toJSON() });
+  const done = ok => toast(ok ? 'Brain copied. Paste it anywhere on this page to import it later.' : 'Brain saved as a file.');
+  try {
+    navigator.clipboard.writeText(json).then(() => done(true), () => done(false));
+  } catch (e) { done(false); }
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    a.download = `autopilot-brain-level${sim.level}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (e) { /* downloads blocked — the clipboard copy still works */ }
 });
 
-$('fileImport').addEventListener('change', async e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
+function importBrain(text) {
   try {
-    const obj = JSON.parse(await file.text());
+    const obj = JSON.parse(text);
     const brain = NeuralNet.fromJSON(obj.brain || obj);
     if (brain.sizes.join() !== NET_SHAPE.join()) throw new Error('This brain has a different network shape.');
     sim.champion = { brain, safety: obj.safety || 0, level: sim.level, gen: sim.generation };
@@ -231,10 +236,32 @@ $('fileImport').addEventListener('change', async e => {
   } catch (err) {
     toast('Could not import: ' + err.message);
   }
+}
+
+$('fileImport').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) importBrain(await file.text());
 });
 
+document.addEventListener('paste', e => {
+  if (e.target.matches && e.target.matches('input, textarea')) return;
+  const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
+  if (text.includes('"sizes"')) { e.preventDefault(); importBrain(text); }
+});
+
+// Two-step confirmation built into the button (no browser pop-up needed).
+let resetArmed = 0;
 $('btnResetBrains').addEventListener('click', () => {
-  if (!confirm('Erase all learned driving skill, history and saved progress, and start again from level 1?')) return;
+  const btn = $('btnResetBrains');
+  if (!resetArmed) {
+    btn.textContent = 'Click again to erase all progress';
+    resetArmed = setTimeout(() => { resetArmed = 0; btn.textContent = 'Forget everything'; }, 4000);
+    return;
+  }
+  clearTimeout(resetArmed);
+  resetArmed = 0;
+  btn.textContent = 'Forget everything';
   try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ }
   sim.level = 1;
   for (const f of FACTORS) sim.bonus[f.key] = 0;
@@ -243,6 +270,7 @@ $('btnResetBrains').addEventListener('click', () => {
   sim.buildWorld();
   sim.resetBrains();
   refreshPanel(true);
+  toast('Progress erased. Starting fresh at level 1.');
 });
 
 window.addEventListener('resize', () => { renderer.resize(); chart.draw(sim.history, sim.advanceThreshold); });
