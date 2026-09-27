@@ -124,6 +124,46 @@ function buildObstacles(track, p, seed) {
   return obs;
 }
 
+// Obstacles the user places by hand. Specs are stored per track so they come
+// back every generation (and after a reload) until the track changes.
+const PLACEABLE = {
+  cone:   { label: 'Cone', hint: 'small, easy to see' },
+  rock:   { label: 'Rock', hint: 'big and static' },
+  parked: { label: 'Parked car', hint: 'blocks part of a lane' },
+  ped:    { label: 'Pedestrian', hint: 'crosses back and forth' },
+  slow:   { label: 'Slow car', hint: 'drives the lap slowly' },
+};
+
+function makeCustomObstacle(track, p, spec) {
+  const N = track.N, hw = track.hw, i = ((spec.i % N) + N) % N;
+  const at = off => ({ x: track.x[i] + track.nx[i] * off, y: track.y[i] + track.ny[i] * off });
+  let o;
+  if (spec.kind === 'cone' || spec.kind === 'rock') {
+    const r = spec.r || (spec.kind === 'rock' ? 14 : 8);
+    const off = clamp(spec.off, -hw, hw);
+    o = { type: spec.kind, i, r, off, ...at(off) };
+  } else if (spec.kind === 'parked') {
+    const off = clamp(spec.off, -(hw - 5), hw - 5);
+    o = { type: 'parked', i, r: 9, off, h: track.ang[i], hue: 210, ...at(off) };
+  } else if (spec.kind === 'ped') {
+    o = { type: 'ped', i, r: 5, x: 0, y: 0, phase0: spec.phase || 0, amp: hw + 14, speed: p.pedSpeed };
+  } else {
+    o = {
+      type: 'traffic', r: 9, x: 0, y: 0, h: 0, dir: 1, s0: i * TRACK_SPACING,
+      lane: clamp(spec.off, -hw * 0.6, hw * 0.6), speed: Math.max(35, p.trafficSpeed * 0.55), hue: 45,
+    };
+  }
+  o.custom = true;
+  o.spec = spec;
+  return o;
+}
+
+const OBSTACLE_CAUSE = {
+  cone: ['obstacle', 'hit a cone'], rock: ['obstacle', 'hit a rock'],
+  ped: ['ped', 'hit a pedestrian'], traffic: ['car', 'hit another car'], parked: ['car', 'hit a parked car'],
+};
+const CLOSE_LABEL = { barrier: 'barrier', cone: 'cone', rock: 'rock', ped: 'pedestrian', traffic: 'car', parked: 'parked car' };
+
 function updateObstacles(track, obs, t) {
   const N = track.N, L = track.length;
   for (const o of obs) {
@@ -165,6 +205,9 @@ const RAY_ANGLES = [-90, -55, -30, -12, 0, 12, 30, 55, 90].map(d => d * Math.PI 
 const NUM_RAYS = RAY_ANGLES.length;
 const NUM_INPUTS = NUM_RAYS + 4;
 const NET_SHAPE = [NUM_INPUTS, 16, 12, 2];
+const TRACE_LEN = 300;       // samples kept per car (30 s at 10 Hz)
+const TRACE_EVERY = 6;       // sim steps between samples
+const TRACE_CH = 4;          // speed, steering, throttle, clearance
 const STATUS_MUL = { finished: 1, driving: 0.85, timeout: 0.85, stalled: 0.7, crashed: 0.5, 'wrong-way': 0.5 };
 
 class Car {
@@ -186,6 +229,16 @@ class Car {
     this.nearMiss = 0; this.harsh = 0;
     this.steer = 0; this.throttle = 0;
     this.fitness = 0; this.safety = 0;
+    this.outcome = '';
+    this.trace = new Float32Array(TRACE_LEN * TRACE_CH);
+    this.traceN = 0; this.steps = 0;
+    this.clearance = Infinity;
+    this.events = [];
+    this.ccActive = false; this.harshActive = false; this.brakeActive = false;
+  }
+
+  logEvent(kind, text) {
+    if (this.events.length < 80) this.events.push({ t: this.t, kind, text });
   }
 }
 
@@ -215,6 +268,8 @@ class Simulation {
     this.onEvent = null;
     this._near = [];
     this.trackSeed = opts.seed != null ? opts.seed : Math.floor(Math.random() * 1e9);
+    this.custom = [];
+    this.customSeed = this.trackSeed;
     this.buildWorld();
     this.cars = [];
     for (let i = 0; i < this.popSize; i++) this.cars.push(new Car(new NeuralNet(NET_SHAPE)));
@@ -230,7 +285,9 @@ class Simulation {
   buildWorld() {
     this.params = computeParams(this.level, this.bonus);
     this.track = generateTrack(this.trackSeed, this.params);
-    this.obstacles = buildObstacles(this.track, this.params, this.trackSeed);
+    if (this.customSeed !== this.trackSeed) { this.custom = []; this.customSeed = this.trackSeed; }
+    this.obstacles = buildObstacles(this.track, this.params, this.trackSeed)
+      .concat(this.custom.map(spec => makeCustomObstacle(this.track, this.params, spec)));
     this.timeLimit = (this.params.laps * this.track.length) / this.params.minAvgSpeed + 4;
     this.prevCrashMarks = [];
     this.crashMarks = [];
@@ -258,7 +315,61 @@ class Simulation {
     this.finishedCount = 0;
     this.aliveCount = this.cars.length;
     updateObstacles(this.track, this.obstacles, 0);
-    for (const c of this.cars) c.reset(this.track);
+    this.cars.forEach((c, k) => { c.id = k + 1; c.reset(this.track); });
+  }
+
+  // ---- hand-placed obstacles ------------------------------------------------
+  placeObstacle(kind, x, y, size) {
+    const tr = this.track, N = tr.N;
+    let i = 0, bd = Infinity;
+    for (let k = 0; k < N; k++) {
+      const dx = x - tr.x[k], dy = y - tr.y[k], d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; i = k; }
+    }
+    const off = (x - tr.x[i]) * tr.nx[i] + (y - tr.y[i]) * tr.ny[i];
+    if (Math.abs(off) > tr.hw + 2) return 'off-road';
+    if (Math.min(i, N - i) < 10) return 'start';
+    const spec = { kind, i, off: clamp(off, -tr.hw, tr.hw) };
+    if (kind === 'cone' || kind === 'rock') spec.r = size;
+    if (kind === 'ped') spec.phase = Math.asin(clamp(off / (tr.hw + 14), -1, 1));
+    const o = makeCustomObstacle(tr, this.params, spec);
+    // Appear exactly where clicked right now, even mid-generation.
+    if (o.type === 'ped') o.phase0 = spec.phase - (this.time * o.speed) / o.amp;
+    if (o.type === 'traffic') o.s0 = i * TRACK_SPACING - o.speed * this.time;
+    this.custom.push(spec);
+    this.obstacles.push(o);
+    updateObstacles(tr, [o], this.time);
+    return 'ok';
+  }
+
+  removeObstacleAt(x, y, reach) {
+    let best = -1, bd = Infinity;
+    this.obstacles.forEach((o, k) => {
+      const d = Math.hypot(o.x - x, o.y - y) - o.r;
+      if (d < bd) { bd = d; best = k; }
+    });
+    if (best < 0 || bd > reach) return null;
+    const [o] = this.obstacles.splice(best, 1);
+    if (o.custom) this.custom = this.custom.filter(s => s !== o.spec);
+    return o;
+  }
+
+  clearCustomObstacles() {
+    this.obstacles = this.obstacles.filter(o => !o.custom);
+    this.custom = [];
+  }
+
+  clearAllObstacles() {
+    this.obstacles = [];
+    this.custom = [];
+  }
+
+  // Safety score a car would get if it stopped right now.
+  liveSafety(car) {
+    if (!car.alive) return car.safety;
+    const dist = Math.max(0, car.maxProgress - START_IDX);
+    const completion = clamp(dist / (this.track.N * this.params.laps), 0, 1);
+    return 100 * completion * Math.exp(-(car.nearMiss * 0.18 + car.harsh * 0.01));
   }
 
   step(dt) {
@@ -320,6 +431,10 @@ class Simulation {
     car.throttle = out[1];
     const steerRate = Math.abs(car.steer - prevSteer) / dt;
     if (steerRate > 3) car.harsh += (steerRate - 3) * dt;
+    if (steerRate > 6 && !car.harshActive) car.logEvent('warn', `Jerky steering (${car.steer < 0 ? 'left' : 'right'})`);
+    car.harshActive = steerRate > 4;
+    if (car.throttle < -0.5 && !car.brakeActive && car.speed > 60) car.logEvent('info', `Braked hard at ${Math.round(car.speed)} px/s`);
+    car.brakeActive = car.throttle < -0.3;
 
     car.h += car.steer * STEER_RATE * dt * Math.min(1, car.speed / 80);
     const fx = Math.cos(car.h), fy = Math.sin(car.h);
@@ -354,9 +469,10 @@ class Simulation {
       const dn = (c * lxc - s * lyc) * nx + (s * lxc + c * lyc) * ny;
       edge = Math.max(edge, Math.abs(car.off + dn));
     }
-    if (edge > tr.hw) return this.kill(car, 'crashed', 'hit the barrier');
+    if (edge > tr.hw) return this.kill(car, 'crashed', 'hit the barrier', 'wall');
     const margin = tr.hw - edge;
-    if (margin < 4) car.nearMiss += dt * 0.5 * (1 - margin / 4);
+    let closeKind = null, closeGap = Infinity;
+    if (margin < 4) { car.nearMiss += dt * 0.5 * (1 - margin / 4); closeKind = 'barrier'; closeGap = margin; }
 
     // --- Collisions with obstacles
     for (let k = 0; k < near.length; k++) {
@@ -367,27 +483,46 @@ class Simulation {
       const px = clamp(lxo, -CAR_L / 2, CAR_L / 2), py = clamp(lyo, -CAR_W / 2, CAR_W / 2);
       const dist = Math.hypot(lxo - px, lyo - py);
       if (dist < o.r) {
-        const what = o.type === 'ped' ? 'hit a pedestrian' : o.type === 'traffic' ? 'hit another car' : 'hit an obstacle';
-        return this.kill(car, 'crashed', what);
+        const [key, what] = OBSTACLE_CAUSE[o.type];
+        return this.kill(car, 'crashed', what, key);
       }
       // Close-call zone is small enough that even the narrowest road leaves a clean line past every hazard.
-      if (dist < o.r + CLOSE_CALL) car.nearMiss += dt * (1 - (dist - o.r) / CLOSE_CALL) * (o.type === 'ped' ? 3 : 1.5);
+      if (dist < o.r + CLOSE_CALL) {
+        car.nearMiss += dt * (1 - (dist - o.r) / CLOSE_CALL) * (o.type === 'ped' ? 3 : 1.5);
+        if (dist - o.r < closeGap) { closeGap = dist - o.r; closeKind = o.type; }
+      }
+    }
+    if (closeKind && !car.ccActive) car.logEvent('warn', `Close call with ${CLOSE_LABEL[closeKind]} (${Math.max(0, closeGap).toFixed(0)}px)`);
+    car.ccActive = !!closeKind;
+
+    // --- Telemetry
+    let clr = Infinity;
+    for (let r = 0; r < NUM_RAYS; r++) if (car.rayLen[r] < clr) clr = car.rayLen[r];
+    car.clearance = clr;
+    if (car.steps++ % TRACE_EVERY === 0) {
+      const o = (car.traceN % TRACE_LEN) * TRACE_CH;
+      car.trace[o] = car.speed; car.trace[o + 1] = car.steer; car.trace[o + 2] = car.throttle; car.trace[o + 3] = clr;
+      car.traceN++;
     }
 
     // --- Rules of the exam
-    if (car.progress < car.maxProgress - 30) return this.kill(car, 'wrong-way', 'drove the wrong way');
-    if (car.t - car.lastGain > 5) return this.kill(car, 'stalled', 'stalled');
+    if (car.progress < car.maxProgress - 30) return this.kill(car, 'wrong-way', 'drove the wrong way', 'other');
+    if (car.t - car.lastGain > 5) return this.kill(car, 'stalled', 'stalled', 'other');
     if (car.progress >= START_IDX + N * P.laps) {
       car.finishTime = car.t;
       this.finishedCount++;
-      return this.kill(car, 'finished', 'finished');
+      return this.kill(car, 'finished', 'finished', 'finished');
     }
   }
 
-  kill(car, status, cause) {
+  kill(car, status, cause, outcome) {
     car.alive = false;
     car.status = status;
     car.cause = cause;
+    car.outcome = outcome;
+    if (status === 'finished') car.logEvent('good', `Finished the lap in ${car.t.toFixed(1)}s`);
+    else if (status === 'crashed') car.logEvent('bad', `Crashed: ${cause}`);
+    else car.logEvent('bad', status === 'stalled' ? 'Stalled: no progress for 5s' : status === 'wrong-way' ? 'Turned around and drove the wrong way' : 'Ran out of time');
     if (status === 'crashed') this.crashMarks.push({ x: car.x, y: car.y, cause });
     this.scoreCar(car);
   }
@@ -414,8 +549,11 @@ class Simulation {
 
   endGeneration() {
     for (const car of this.cars) {
-      if (car.alive) { car.alive = false; car.status = 'timeout'; car.cause = 'ran out of time'; this.scoreCar(car); }
+      if (car.alive) this.kill(car, 'timeout', 'ran out of time', 'other');
     }
+    const outcomes = { finished: 0, wall: 0, obstacle: 0, ped: 0, car: 0, other: 0 };
+    for (const c of this.cars) outcomes[c.outcome || 'other']++;
+    this.lastCars = this.cars;
     const cars = this.cars.slice().sort((a, b) => b.fitness - a.fitness);
     const best = cars[0];
     let bestSafety = 0, sumSafety = 0, crashes = 0;
@@ -429,7 +567,7 @@ class Simulation {
     this.bestSafetyOnLevel = Math.max(this.bestSafetyOnLevel, bestSafety);
     this.history.push({
       gen: this.generation, level: this.level, best: bestSafety, avg: avgSafety,
-      finished: this.finishedCount, crashes, pop: cars.length,
+      finished: this.finishedCount, crashes, pop: cars.length, outcomes,
     });
     if (this.history.length > 2000) this.history.shift();
 

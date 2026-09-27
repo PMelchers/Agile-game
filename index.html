@@ -13,6 +13,7 @@
       <canvas id="world"></canvas>
       <div class="hud" id="hud" aria-live="polite"></div>
       <div class="toast" id="toast" hidden></div>
+      <div class="build-banner" id="buildBanner" hidden></div>
       <div class="stage-controls">
         <button id="btnPause" class="btn" title="Pause / play (Space)">Pause</button>
         <div class="seg" id="speedSeg" role="group" aria-label="Simulation speed">
@@ -24,6 +25,7 @@
         </div>
         <button id="btnCam" class="btn" title="Toggle camera (C)">Overview</button>
         <button id="btnSensors" class="btn" aria-pressed="true" title="Toggle sensor rays (S)">Sensors</button>
+        <button id="btnBuild" class="btn" aria-pressed="false" title="Place obstacles on the road (B)">Place obstacles</button>
       </div>
     </section>
 
@@ -35,6 +37,14 @@
 
       <div class="stats" id="stats"></div>
 
+      <nav class="tabs" role="tablist" aria-label="Panels">
+        <button role="tab" id="tab-train" aria-controls="panel-train" data-tab="train">Train</button>
+        <button role="tab" id="tab-monitor" aria-controls="panel-monitor" data-tab="monitor">Monitor</button>
+        <button role="tab" id="tab-fleet" aria-controls="panel-fleet" data-tab="fleet">Fleet</button>
+        <button role="tab" id="tab-build" aria-controls="panel-build" data-tab="build">Obstacles</button>
+      </nav>
+
+      <div class="tab-panel" role="tabpanel" id="panel-train" aria-labelledby="tab-train">
       <section class="card">
         <div class="card-head">
           <h2>Safety score by generation</h2>
@@ -80,13 +90,97 @@
         </div>
       </section>
 
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-monitor" aria-labelledby="tab-monitor" hidden>
       <section class="card">
-        <h2>Leader's brain (live)</h2>
+        <div class="card-head">
+          <h2 id="monTitle">Car</h2>
+          <span class="chip" id="monStatus"></span>
+        </div>
+        <p class="hint" id="monHint">Click any car on the road to watch it. Until then this follows the leader.</p>
+        <div class="gauges" id="monGauges"></div>
+        <div class="bars">
+          <div class="bar-row"><span>Steering</span><div class="cbar" id="barSteer"><i></i></div><b id="valSteer"></b></div>
+          <div class="bar-row"><span>Gas / brake</span><div class="cbar" id="barGas"><i></i></div><b id="valGas"></b></div>
+        </div>
+        <div class="mon-grid">
+          <div>
+            <h3>What the sensors see</h3>
+            <canvas id="radar"></canvas>
+          </div>
+          <div>
+            <h3>Last 30 seconds</h3>
+            <canvas id="telemetry"></canvas>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btnFollowLeader" class="btn" hidden>Watch the leader again</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>What happened on this run</h2>
+        <ol class="events" id="monEvents"></ol>
+      </section>
+
+      <section class="card">
+        <h2>Brain (live)</h2>
         <canvas id="brain"></canvas>
         <p class="hint">Inputs on the left: 9 distance sensors plus speed, lane position, heading and upcoming bend. Blue is positive, orange is negative.</p>
       </section>
+      </div>
 
-      <footer class="keys">Space pause · 1–5 speed · C camera · S sensors · N new track · scroll to zoom</footer>
+      <div class="tab-panel" role="tabpanel" id="panel-fleet" aria-labelledby="tab-fleet" hidden>
+      <section class="card">
+        <h2>This generation so far</h2>
+        <div class="obar" id="liveBar"></div>
+        <div class="olegend" id="liveLegend"></div>
+      </section>
+
+      <section class="card">
+        <h2>How each generation ended</h2>
+        <div class="chart-wrap">
+          <canvas id="outcomes"></canvas>
+          <div class="tooltip" id="outcomeTip" hidden></div>
+        </div>
+        <div class="olegend" id="outcomeLegend"></div>
+        <p class="hint">As the fleet learns, the crash colours shrink and the finished share grows.</p>
+      </section>
+
+      <section class="card">
+        <h2>Leaderboard (live)</h2>
+        <div class="table-wrap">
+          <table class="board">
+            <thead><tr><th>#</th><th>Car</th><th>Status</th><th>Lap</th><th>Speed</th><th>Close calls</th><th>Safety</th></tr></thead>
+            <tbody id="board"></tbody>
+          </table>
+        </div>
+        <p class="hint">Click a row to watch that car in the Monitor tab.</p>
+      </section>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-build" aria-labelledby="tab-build" hidden>
+      <section class="card">
+        <h2>Place obstacles</h2>
+        <p class="hint">Pick one, then click the road. Cars react straight away. Your obstacles stay on this track for every generation until the track changes.</p>
+        <div class="tools" id="tools" role="radiogroup" aria-label="Obstacle to place"></div>
+        <label class="slider">Cone and rock size <b id="objSizeVal"></b><input type="range" id="objSize" min="5" max="22" step="1" value="10"></label>
+        <p class="hint" id="buildCount"></p>
+        <div class="btn-row">
+          <button id="btnClearMine" class="btn">Remove my obstacles</button>
+          <button id="btnClearAll" class="btn danger">Clear the whole road</button>
+        </div>
+        <p class="hint">Clearing the whole road also removes the random hazards until the track or the difficulty changes.</p>
+      </section>
+      <section class="card">
+        <h2>Random hazards</h2>
+        <p class="hint">How many random cones, pedestrians and cars appear is set by the difficulty.</p>
+        <div class="factors" id="buildFactors"></div>
+      </section>
+      </div>
+
+      <footer class="keys">Space pause · 1–5 speed · C camera · S sensors · B place obstacles · Esc stop placing · N new track · scroll to zoom · click a car to watch it</footer>
     </aside>
   </main>
 
@@ -95,6 +189,7 @@
   <script src="js/track.js"></script>
   <script src="js/sim.js"></script>
   <script src="js/render.js"></script>
+  <script src="js/monitor.js"></script>
   <script src="js/ui.js"></script>
 </body>
 </html>

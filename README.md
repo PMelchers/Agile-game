@@ -72,6 +72,36 @@ With **auto level-up** on, the world moves to the next level (on a brand-new
 track) once the best car finishes the lap with a safety score at or above the
 pass mark (75 by default, and you can change it).
 
+## Put your own obstacles on the road
+
+Open the **Obstacles** tab (or press **B**), pick an obstacle, and click the road:
+
+| Obstacle | Behaviour |
+|---|---|
+| Cone | small and static, with an adjustable size |
+| Rock | big and static, with an adjustable size |
+| Parked car | static, blocks part of a lane |
+| Pedestrian | crosses the road back and forth |
+| Slow car | drives the lap slowly, so the fleet has to overtake it |
+| Eraser | removes any obstacle you click, including random ones |
+
+Cars react straight away. Hand-placed obstacles have a dashed ring and stay on
+the track for every generation, and after a reload, until the track changes.
+The same tab has quick controls for how many random hazards appear.
+
+## Behaviour monitors
+
+- **Monitor tab:** click any car on the road (or a leaderboard row) to watch
+  it. You get its speed, lap progress, live safety score, close calls, jerky
+  steering and nearest-object distance, plus bars for steering and gas/brake.
+  There's a radar of what its 9 sensors see, the last 30 seconds of speed,
+  steering, gas/brake and clearance (hover to scrub), a timeline of events
+  (close calls, hard braking, jerky steering, crash or finish), and its brain
+  firing live.
+- **Fleet tab:** how this generation's runs have ended so far, a stacked chart
+  of how every recent generation ended (finished, or which kind of crash), and
+  a live leaderboard.
+
 ## Controls
 
 | Key | Action |
@@ -81,6 +111,8 @@ pass mark (75 by default, and you can change it).
 | C | follow the leader / overview the whole track |
 | S | show or hide sensor rays |
 | N | new random track |
+| B | place obstacles (Esc stops) |
+| Click a car | watch it in the Monitor tab |
 | Mouse wheel | zoom |
 
 You can also **export** the best brain as JSON and **import** it later, or into
@@ -95,4 +127,5 @@ someone else's world.
 | `js/track.js` | procedural track generation, spatial grid, ray casting |
 | `js/sim.js` | difficulty, obstacles, car physics, scoring, genetic algorithm |
 | `js/render.js` | world renderer, safety chart, live brain view |
+| `js/monitor.js` | sensor radar, telemetry strips, outcome chart |
 | `js/ui.js` | controls, save/load, main loop |

@@ -7,12 +7,22 @@ const $ = id => document.getElementById(id);
 const sim = new Simulation();
 const renderer = new Renderer($('world'));
 const chart = new SafetyChart($('chart'), $('chartTip'));
+const telemetry = new Telemetry($('telemetry'));
+const outcomeChart = new OutcomeChart($('outcomes'), $('outcomeTip'));
 
 let paused = false;
 let speed = 3;
 let lastGen = sim.generation;
 let lastPanel = 0;
 let toastTimer = 0;
+let tab = 'train';
+let picked = null;          // car the viewer clicked on (null = follow the leader)
+let pickedGen = 0;
+let tool = null;            // obstacle kind being placed, 'erase', or null
+let objSize = 10;
+let ghost = null;
+let lastEventsKey = '';
+let lastMonitor = 0;
 
 // ---------------------------------------------------------------- persistence
 function save() {
@@ -21,6 +31,7 @@ function save() {
       level: sim.level, bonus: sim.bonus, generation: sim.generation, trackSeed: sim.trackSeed,
       history: sim.history.slice(-400), log: sim.log.slice(0, 40),
       bestSafetyOnLevel: sim.bestSafetyOnLevel,
+      custom: sim.custom, tab,
       settings: {
         popSize: sim.popSize, mutRate: sim.mutRate, mutStrength: sim.mutStrength,
         autoAdvance: sim.autoAdvance, advanceThreshold: sim.advanceThreshold, newTrackEachGen: sim.newTrackEachGen,
@@ -43,6 +54,9 @@ function load() {
     sim.generation = Math.max(1, data.generation | 0);
     sim.history = Array.isArray(data.history) ? data.history : [];
     sim.log = Array.isArray(data.log) ? data.log : [];
+    sim.custom = Array.isArray(data.custom) ? data.custom.filter(c => PLACEABLE[c.kind] && Number.isFinite(c.i) && Number.isFinite(c.off)) : [];
+    sim.customSeed = sim.trackSeed;
+    if (data.tab) tab = data.tab;
     sim.buildWorld();
     sim.bestSafetyOnLevel = data.bestSafetyOnLevel || 0;
     if (data.champion) {
@@ -126,12 +140,14 @@ function bindSlider(id, key, fmt) {
   el.addEventListener('input', () => { sim[key] = +el.value; out.textContent = fmt(sim[key]); save(); });
 }
 
-// Factor rows (built once, text refreshed)
+// Factor rows (built once, text refreshed). The same factor can appear in
+// more than one panel, so each key keeps a list of rows.
 const factorEls = {};
-function buildFactors() {
-  const box = $('factors');
+function buildFactors(boxId, keys) {
+  const box = $(boxId);
   box.innerHTML = '';
   for (const f of FACTORS) {
+    if (keys && !keys.includes(f.key)) continue;
     const row = document.createElement('div');
     row.className = 'factor';
     row.innerHTML =
@@ -142,7 +158,7 @@ function buildFactors() {
     minus.addEventListener('click', () => bumpFactor(f.key, -1));
     plus.addEventListener('click', () => bumpFactor(f.key, 1));
     box.appendChild(row);
-    factorEls[f.key] = { row, tag: row.querySelector('small'), desc: row.querySelector('.desc'), lv: row.querySelector('.lv'), minus };
+    (factorEls[f.key] || (factorEls[f.key] = [])).push({ row, tag: row.querySelector('small'), desc: row.querySelector('.desc'), lv: row.querySelector('.lv'), minus });
   }
 }
 function bumpFactor(key, d) {
@@ -174,27 +190,272 @@ function refreshPanel(full) {
     stat('Level record', sim.bestSafetyOnLevel ? sim.bestSafetyOnLevel.toFixed(0) : '–');
   $('lvl').textContent = sim.level;
   for (const f of FACTORS) {
-    const e = factorEls[f.key], lv = sim.params.f[f.key], b = sim.bonus[f.key];
-    e.lv.textContent = lv;
-    e.row.classList.toggle('off', lv === 0);
-    e.tag.textContent = b ? ` ${b > 0 ? '+' : ''}${b}` : '';
-    e.desc.textContent = lv === 0 ? (sim.level <= f.unlock && b === 0 ? `unlocks after level ${f.unlock}` : 'off') : describeFactor(f.key, sim.params);
-    e.minus.disabled = lv <= 0;
+    const lv = sim.params.f[f.key], b = sim.bonus[f.key];
+    for (const e of factorEls[f.key] || []) {
+      e.lv.textContent = lv;
+      e.row.classList.toggle('off', lv === 0);
+      e.tag.textContent = b ? ` ${b > 0 ? '+' : ''}${b}` : '';
+      e.desc.textContent = lv === 0 ? (sim.level <= f.unlock && b === 0 ? `unlocks after level ${f.unlock}` : 'off') : describeFactor(f.key, sim.params);
+      e.minus.disabled = lv <= 0;
+    }
   }
+  const mine = sim.custom.length;
+  $('buildCount').textContent = mine
+    ? `You have placed ${mine} obstacle${mine === 1 ? '' : 's'} on this track. ${sim.obstacles.length} obstacles are on the road in total.`
+    : `${sim.obstacles.length} random obstacles are on the road. You haven't placed any yet.`;
   $('boostHint').textContent = sim.boost > 1.01
     ? `Progress has stalled, so mutation is boosted ×${sim.boost.toFixed(2)} to explore new ideas.`
     : 'Half the children get small tweaks and half get bold changes.';
-  if (full) { chart.draw(sim.history, sim.advanceThreshold); renderLog(); }
+  if (full) {
+    chart.draw(sim.history, sim.advanceThreshold);
+    renderLog();
+    if (tab === 'fleet') outcomeChart.draw(sim.history);
+  }
 }
 
+function lapPct(c) { return clamp((c.maxProgress - START_IDX) / (sim.track.N * sim.params.laps), 0, 1) * 100; }
+
 function refreshHud() {
-  const lead = sim.leader();
-  const pct = lead ? clamp((lead.maxProgress - START_IDX) / (sim.track.N * sim.params.laps), 0, 1) * 100 : 0;
+  const f = focusCar();
   $('hud').innerHTML =
     `<div class="big">Generation ${sim.generation} · Level ${sim.level}</div>` +
     `<div class="sub">${sim.aliveCount} driving · ${sim.finishedCount} finished · ${sim.time.toFixed(1)}s / ${sim.timeLimit.toFixed(0)}s</div>` +
-    (lead ? `<div class="sub">Leader: ${Math.round(lead.speed)} px/s · ${pct.toFixed(0)}% of lap · ${lead.alive ? 'driving' : lead.cause}</div>` : '');
+    (f ? `<div class="sub">${picked ? `Watching car ${f.id}` : 'Leader'}: ${Math.round(f.speed)} px/s · ${lapPct(f).toFixed(0)}% of lap · ${f.alive ? 'driving' : f.cause}</div>` : '');
 }
+
+// ------------------------------------------------------- car picking & focus
+function focusCar() {
+  if (picked && (pickedGen !== sim.generation || !sim.cars.includes(picked))) picked = null;
+  return picked || sim.leader();
+}
+function pickCar(car) {
+  picked = car;
+  pickedGen = sim.generation;
+  lastEventsKey = '';
+  if (renderer.mode !== 'follow') toggleCam();
+  refreshMonitor(true);
+}
+$('btnFollowLeader').addEventListener('click', () => { picked = null; lastEventsKey = ''; refreshMonitor(true); });
+
+// ------------------------------------------------------------------- tabs
+function setTab(name) {
+  tab = name;
+  for (const b of document.querySelectorAll('.tabs button')) {
+    const on = b.dataset.tab === name;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+    $('panel-' + b.dataset.tab).hidden = !on;
+  }
+  if (name === 'train') chart.draw(sim.history, sim.advanceThreshold);
+  if (name === 'monitor') { lastEventsKey = ''; refreshMonitor(true); }
+  if (name === 'fleet') { outcomeChart.draw(sim.history); refreshFleet(); }
+  if (name !== 'build' && tool) setTool(null);
+  save();
+}
+document.querySelector('.tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (b) setTab(b.dataset.tab);
+});
+document.querySelector('.tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const names = ['train', 'monitor', 'fleet', 'build'];
+  const next = names[(names.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : 3)) % 4];
+  setTab(next);
+  $('tab-' + next).focus();
+});
+
+// ------------------------------------------------------------ car monitor
+const STATUS_TEXT = { driving: 'Driving', finished: 'Finished', crashed: 'Crashed', stalled: 'Stalled', 'wrong-way': 'Wrong way', timeout: 'Out of time' };
+function gauge(k, v) { return `<div class="gauge"><div class="v">${v}</div><div class="k">${k}</div></div>`; }
+function setBar(id, v) {
+  const bar = $(id), i = bar.firstElementChild;
+  const w = Math.abs(clamp(v, -1, 1)) * 50;
+  i.style.left = (v < 0 ? 50 - w : 50) + '%';
+  i.style.width = w + '%';
+  if (id === 'barGas') bar.classList.toggle('brake', v < 0);
+}
+
+function refreshMonitor(force) {
+  if (tab !== 'monitor') return;
+  const c = focusCar();
+  if (!c) return;
+  $('monTitle').textContent = `Car ${c.id}${picked ? '' : ' (leader)'}`;
+  const st = $('monStatus');
+  st.className = 'chip ' + c.status;
+  st.textContent = c.alive ? STATUS_TEXT.driving
+    : `${STATUS_TEXT[c.status]}${c.status === 'crashed' ? ` (${c.cause.replace(/^hit (the |a |an |another )?/, '')})` : ''}`;
+  $('monHint').hidden = !!picked;
+  $('btnFollowLeader').hidden = !picked;
+  const clr = c.alive && Number.isFinite(c.clearance) ? `${Math.round(c.clearance)} px` : '–';
+  $('monGauges').innerHTML =
+    gauge(c.status === 'crashed' ? 'Impact speed' : c.alive ? 'Speed' : 'Final speed', `${Math.round(c.speed)} <small>px/s</small>`) +
+    gauge('Lap done', `${lapPct(c).toFixed(0)}%`) +
+    gauge('Safety so far', sim.liveSafety(c).toFixed(0)) +
+    gauge('Close calls', `${c.nearMiss.toFixed(1)}s`) +
+    gauge('Jerky steering', c.harsh.toFixed(1)) +
+    gauge('Nearest thing', clr);
+  setBar('barSteer', c.steer);
+  $('valSteer').textContent = Math.abs(c.steer) < 0.05 ? 'straight' : `${Math.round(Math.abs(c.steer) * 100)}% ${c.steer < 0 ? 'left' : 'right'}`;
+  setBar('barGas', c.throttle);
+  $('valGas').textContent = c.throttle >= 0 ? `gas ${Math.round(c.throttle * 100)}%` : `brake ${Math.round(-c.throttle * 100)}%`;
+  drawRadar($('radar'), c, sim.params.sensorRange);
+  telemetry.draw(c, sim.params.sensorRange);
+  drawBrain($('brain'), c.brain);
+  const key = `${sim.generation}:${c.id}:${c.events.length}`;
+  if (force || key !== lastEventsKey) {
+    lastEventsKey = key;
+    $('monEvents').innerHTML = c.events.length
+      ? c.events.slice().reverse().map(e => `<li><span class="t">${e.t.toFixed(1)}s</span><span class="${e.kind}">${escapeHtml(e.text)}</span></li>`).join('')
+      : '<li><span class="t">–</span><span>Nothing notable yet: no close calls, jerky steering or hard braking.</span></li>';
+  }
+}
+
+// ------------------------------------------------------------ fleet view
+function legendHtml(counts, total) {
+  return OUTCOMES.map(o => `<span><i class="dot" style="background:var(${o.color})"></i>${o.label} <b>${counts[o.key]}</b></span>`).join('') +
+    (total != null ? `<span><i class="dot" style="background:var(--surface);outline:1px solid var(--border)"></i>Still driving <b>${total}</b></span>` : '');
+}
+function refreshFleet() {
+  if (tab !== 'fleet') return;
+  const counts = { finished: 0, wall: 0, obstacle: 0, ped: 0, car: 0, other: 0 };
+  let driving = 0;
+  for (const c of sim.cars) { if (c.alive) driving++; else counts[c.outcome || 'other']++; }
+  const n = sim.cars.length;
+  $('liveBar').innerHTML = OUTCOMES.map(o => counts[o.key]
+    ? `<i style="width:${(counts[o.key] / n) * 100}%;background:var(${o.color})" title="${o.label}: ${counts[o.key]}"></i>` : '').join('');
+  $('liveLegend').innerHTML = legendHtml(counts, driving);
+
+  const ranked = sim.cars.slice().sort((a, b) => (b.alive - a.alive) || (b.progress - a.progress) || (b.maxProgress - a.maxProgress));
+  const f = focusCar();
+  const rows = ranked.slice(0, 10);
+  if (f && !rows.includes(f)) rows.push(f);
+  $('board').innerHTML = rows.map(c => {
+    const rank = ranked.indexOf(c) + 1;
+    return `<tr data-id="${c.id}" class="${c === f ? 'picked' : ''}"><td>${rank}</td><td>${c.id}</td>` +
+      `<td><span class="chip ${c.status}">${c.alive ? 'Driving' : STATUS_TEXT[c.status]}</span></td>` +
+      `<td>${lapPct(c).toFixed(0)}%</td><td>${c.alive ? Math.round(c.speed) : '–'}</td>` +
+      `<td>${c.nearMiss.toFixed(1)}s</td><td>${sim.liveSafety(c).toFixed(0)}</td></tr>`;
+  }).join('');
+}
+$('board').addEventListener('pointerdown', e => {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  const car = sim.cars.find(c => c.id === +tr.dataset.id);
+  if (car) { pickCar(car); setTab('monitor'); }
+});
+$('outcomeLegend').innerHTML = OUTCOMES.map(o => `<span><i class="dot" style="background:var(${o.color})"></i>${o.label}</span>`).join('');
+
+// ------------------------------------------------------------ obstacle tools
+const TOOL_KINDS = [...Object.keys(PLACEABLE), 'erase'];
+function buildTools() {
+  const box = $('tools');
+  box.innerHTML = '';
+  for (const kind of TOOL_KINDS) {
+    const b = document.createElement('button');
+    b.className = 'tool';
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', 'false');
+    b.dataset.kind = kind;
+    const label = kind === 'erase' ? 'Eraser' : PLACEABLE[kind].label;
+    const hint = kind === 'erase' ? 'click to remove' : PLACEABLE[kind].hint;
+    b.innerHTML = `<canvas width="68" height="48"></canvas><span>${label}</span><small>${hint}</small>`;
+    b.addEventListener('click', () => setTool(tool === kind ? null : kind));
+    box.appendChild(b);
+    const ctx = b.querySelector('canvas').getContext('2d');
+    ctx.scale(2, 2);
+    if (kind === 'erase') {
+      ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(11, 6); ctx.lineTo(23, 18); ctx.moveTo(23, 6); ctx.lineTo(11, 18); ctx.stroke();
+    } else {
+      ctx.fillStyle = '#44474d'; ctx.fillRect(0, 2, 34, 20);
+      const o = previewObstacle(kind, 17, 12);
+      if (o.type === 'cone' || o.type === 'rock') o.r = Math.min(o.r, 9);
+      renderer.drawObstacle(o, ctx);
+    }
+  }
+}
+function previewObstacle(kind, x, y) {
+  const type = kind === 'slow' ? 'traffic' : kind;
+  const r = kind === 'cone' || kind === 'rock' ? objSize : kind === 'ped' ? 5 : 9;
+  return { type, x, y, r, h: 0, hue: 45 };
+}
+function setTool(kind) {
+  tool = kind;
+  ghost = null;
+  for (const b of $('tools').querySelectorAll('.tool')) b.setAttribute('aria-checked', String(b.dataset.kind === kind));
+  $('btnBuild').setAttribute('aria-pressed', String(!!kind));
+  document.querySelector('.stage').classList.toggle('building', !!kind);
+  const banner = $('buildBanner');
+  banner.hidden = !kind;
+  if (kind) banner.textContent = kind === 'erase'
+    ? 'Eraser: click an obstacle to remove it · Esc to stop'
+    : `Placing: ${PLACEABLE[kind].label.toLowerCase()} · click the road · Esc to stop`;
+}
+$('btnBuild').addEventListener('click', () => {
+  if (tool) { setTool(null); return; }
+  setTab('build');
+  setTool('cone');
+});
+$('objSize').addEventListener('input', e => { objSize = +e.target.value; $('objSizeVal').textContent = objSize + ' px'; });
+$('btnClearMine').addEventListener('click', () => { sim.clearCustomObstacles(); refreshPanel(false); save(); toast('Removed your obstacles.'); });
+$('btnClearAll').addEventListener('click', () => { sim.clearAllObstacles(); refreshPanel(false); save(); toast('The road is clear until the track or difficulty changes.'); });
+
+// ------------------------------------------------------------ canvas input
+function canvasPoint(e) {
+  const r = $('world').getBoundingClientRect();
+  return renderer.screenToWorld(e.clientX - r.left, e.clientY - r.top);
+}
+function nearestCar(p) {
+  let best = null, bd = (24 / renderer.cam.zoom) ** 2 + 400;
+  for (const c of sim.cars) {
+    if (!c.alive && c.status !== 'finished') continue;
+    const d = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best;
+}
+$('world').addEventListener('pointermove', e => {
+  const p = canvasPoint(e);
+  if (!tool) {
+    $('world').style.cursor = nearestCar(p) ? 'pointer' : '';
+    return;
+  }
+  if (tool === 'erase') {
+    const hit = sim.obstacles.some(o => Math.hypot(o.x - p.x, o.y - p.y) - o.r < 12);
+    ghost = { kind: 'erase', x: p.x, y: p.y, ok: hit };
+    return;
+  }
+  const tr = sim.track;
+  let best = 0, bd = Infinity;
+  for (let k = 0; k < tr.N; k += 2) {
+    const d = (p.x - tr.x[k]) ** 2 + (p.y - tr.y[k]) ** 2;
+    if (d < bd) { bd = d; best = k; }
+  }
+  const off = (p.x - tr.x[best]) * tr.nx[best] + (p.y - tr.y[best]) * tr.ny[best];
+  const ok = Math.abs(off) <= tr.hw + 2 && Math.min(best, tr.N - best) >= 10;
+  const o = previewObstacle(tool, p.x, p.y);
+  o.h = tr.ang[best];
+  ghost = { kind: tool, x: p.x, y: p.y, ok, o };
+});
+$('world').addEventListener('pointerleave', () => { ghost = null; });
+let downAt = null;
+$('world').addEventListener('pointerdown', e => { downAt = { x: e.clientX, y: e.clientY }; });
+$('world').addEventListener('pointerup', e => {
+  if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) { downAt = null; return; }
+  downAt = null;
+  const p = canvasPoint(e);
+  if (tool === 'erase') {
+    const o = sim.removeObstacleAt(p.x, p.y, 12);
+    if (o) { refreshPanel(false); save(); } else toast('Nothing to remove there. Click right on an obstacle.');
+  } else if (tool) {
+    const res = sim.placeObstacle(tool, p.x, p.y, objSize);
+    if (res === 'ok') { refreshPanel(false); save(); }
+    else toast(res === 'start' ? 'Keep the start line clear so the cars can set off.' : 'Place obstacles on the road, not the grass.');
+  } else {
+    const car = nearestCar(p);
+    if (car) { pickCar(car); if (tab !== 'monitor') setTab('monitor'); }
+  }
+});
 
 document.addEventListener('keydown', e => {
   if (e.target.matches('input, textarea')) return;
@@ -203,6 +464,8 @@ document.addEventListener('keydown', e => {
   else if (k === 'c') toggleCam();
   else if (k === 's') toggleSensors();
   else if (k === 'n') { sim.newTrack(); refreshPanel(true); }
+  else if (k === 'b') $('btnBuild').click();
+  else if (k === 'escape') { if (tool) setTool(null); else if (picked) { picked = null; lastEventsKey = ''; } }
   else if ('12345'.includes(k) && k.length === 1) setSpeed([1, 3, 10, 30, 'max'][+k - 1]);
 });
 
@@ -273,11 +536,18 @@ $('btnResetBrains').addEventListener('click', () => {
   toast('Progress erased. Starting fresh at level 1.');
 });
 
-window.addEventListener('resize', () => { renderer.resize(); chart.draw(sim.history, sim.advanceThreshold); });
+window.addEventListener('resize', () => {
+  renderer.resize();
+  chart.draw(sim.history, sim.advanceThreshold);
+  if (tab === 'fleet') outcomeChart.draw(sim.history);
+});
 
 // ------------------------------------------------------------------ main loop
 const restored = load();
-buildFactors();
+buildFactors('factors');
+buildFactors('buildFactors', ['cones', 'peds', 'traffic']);
+$('objSizeVal').textContent = objSize + ' px';
+buildTools();
 $('autoAdv').checked = sim.autoAdvance;
 $('newEach').checked = sim.newTrackEachGen;
 $('thr').value = sim.advanceThreshold;
@@ -287,6 +557,7 @@ bindSlider('mr', 'mutRate', v => (+v).toFixed(2));
 bindSlider('ms', 'mutStrength', v => (+v).toFixed(2));
 setSpeed(speed);
 refreshPanel(true);
+setTab(['train', 'monitor', 'fleet', 'build'].includes(tab) ? tab : 'train');
 if (restored) toast(`Welcome back: resuming level ${sim.level}, generation ${sim.generation}`);
 
 let prev = performance.now();
@@ -306,12 +577,17 @@ function frame(now) {
     refreshPanel(true);
     save();
   }
-  renderer.draw(sim, dt);
+  const focus = focusCar();
+  renderer.draw(sim, dt, focus, !!picked, ghost);
   refreshHud();
+  if (now - lastMonitor > 100) {
+    lastMonitor = now;
+    refreshMonitor(false);
+  }
   if (now - lastPanel > 300) {
     lastPanel = now;
     refreshPanel(false);
-    drawBrain($('brain'), sim.leader() && sim.leader().brain);
+    refreshFleet();
   }
   requestAnimationFrame(frame);
 }

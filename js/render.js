@@ -50,15 +50,18 @@ class Renderer {
     this.trees = trees;
   }
 
-  updateCamera(sim, dt) {
+  screenToWorld(sx, sy) {
+    return { x: (sx - this.w / 2) / this.cam.zoom + this.cam.x, y: (sy - this.h / 2) / this.cam.zoom + this.cam.y };
+  }
+
+  updateCamera(sim, dt, focus) {
     const tr = sim.track, b = tr.bounds;
     let tx, ty, tz;
     if (this.mode === 'overview') {
       tx = (b.minX + b.maxX) / 2; ty = (b.minY + b.maxY) / 2;
       tz = Math.min(this.w / (b.maxX - b.minX + 80), this.h / (b.maxY - b.minY + 80));
     } else {
-      const lead = sim.leader();
-      tx = lead ? lead.x : 0; ty = lead ? lead.y : 0;
+      tx = focus ? focus.x : 0; ty = focus ? focus.y : 0;
       tz = clamp(Math.min(this.w, this.h) / 520, 0.6, 2.2);
     }
     tz *= this.userZoom;
@@ -69,9 +72,11 @@ class Renderer {
     this.cam.zoom += (tz - this.cam.zoom) * k;
   }
 
-  draw(sim, dt) {
+  // focus: the car being watched (picked by the viewer, or the leader).
+  // ghost: preview of an obstacle about to be placed, or null.
+  draw(sim, dt, focus, picked, ghost) {
     if (this.track !== sim.track) { this.setTrack(sim.track, sim.params); this.snap = true; }
-    this.updateCamera(sim, dt);
+    this.updateCamera(sim, dt, focus);
     const ctx = this.ctx, tr = sim.track, P = sim.params, z = this.cam.zoom;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = P.f.ice > 0 ? '#2d4a44' : '#2f5a2c';
@@ -129,57 +134,61 @@ class Renderer {
     // Obstacles
     for (const o of sim.obstacles) {
       if (!inView(o.x, o.y)) continue;
-      if (o.type === 'cone') {
-        ctx.fillStyle = '#f07c1e';
-        ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(o.x, o.y, o.r * 0.55, 0, TAU); ctx.stroke();
-      } else if (o.type === 'ped') {
-        ctx.fillStyle = '#ffd23f';
-        ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.fill();
-        ctx.fillStyle = '#6b3fa0';
-        ctx.beginPath(); ctx.arc(o.x, o.y, o.r * 0.5, 0, TAU); ctx.fill();
-      } else {
-        ctx.save();
-        ctx.translate(o.x, o.y); ctx.rotate(o.h);
-        ctx.fillStyle = `hsl(${o.hue},35%,62%)`;
-        roundRect(ctx, -11, -6, 22, 12, 3); ctx.fill();
-        ctx.fillStyle = 'rgba(20,30,40,0.7)'; ctx.fillRect(2, -4.5, 4, 9);
-        ctx.fillStyle = '#ffe9a8'; ctx.fillRect(9, -5, 2, 3); ctx.fillRect(9, 2, 2, 3);
-        ctx.restore();
+      this.drawObstacle(o);
+      if (o.custom) {          // hand-placed: dashed ring so it stands out
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.arc(o.x, o.y, o.r + 4, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
       }
     }
+    if (ghost) {
+      ctx.globalAlpha = 0.55;
+      if (ghost.kind === 'erase') {
+        ctx.strokeStyle = ghost.ok ? '#ff6b6b' : 'rgba(255,255,255,0.5)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(ghost.x, ghost.y, 14, 0, TAU); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ghost.x - 7, ghost.y - 7); ctx.lineTo(ghost.x + 7, ghost.y + 7);
+        ctx.moveTo(ghost.x + 7, ghost.y - 7); ctx.lineTo(ghost.x - 7, ghost.y + 7); ctx.stroke();
+      } else {
+        this.drawObstacle(ghost.o);
+        ctx.strokeStyle = ghost.ok ? '#3ecf8e' : '#ff6b6b'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(ghost.x, ghost.y, ghost.o.r + 5, 0, TAU); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
 
-    // Cars: the crowd first, then the leader on top with its sensors
-    const lead = sim.leader();
+    // Cars: the crowd first, then the watched car on top with its sensors
     for (const c of sim.cars) {
-      if (!c.alive || c === lead || !inView(c.x, c.y)) continue;
+      if (!c.alive || c === focus || !inView(c.x, c.y)) continue;
       this.drawCar(c, 'rgba(120,190,255,0.45)', null);
     }
     for (const c of sim.cars) {
-      if (c.status !== 'finished' || !inView(c.x, c.y)) continue;
+      if (c.status !== 'finished' || c === focus || !inView(c.x, c.y)) continue;
       this.drawCar(c, 'rgba(90,230,150,0.5)', null);
     }
-    if (lead) {
-      if (this.showSensors && lead.alive) {
+    if (focus) {
+      if (this.showSensors && focus.alive) {
         for (let r = 0; r < NUM_RAYS; r++) {
-          const a = lead.h + RAY_ANGLES[r], d = lead.rayLen[r];
-          const v = lead.sensors[r];
+          const a = focus.h + RAY_ANGLES[r], d = focus.rayLen[r];
+          const v = focus.sensors[r];
           ctx.strokeStyle = `rgba(${Math.round(80 + 175 * v)},${Math.round(230 - 170 * v)},120,0.75)`;
           ctx.lineWidth = 1.2 / z * 1.5;
-          ctx.beginPath(); ctx.moveTo(lead.x, lead.y);
-          ctx.lineTo(lead.x + Math.cos(a) * d, lead.y + Math.sin(a) * d); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(focus.x, focus.y);
+          ctx.lineTo(focus.x + Math.cos(a) * d, focus.y + Math.sin(a) * d); ctx.stroke();
           ctx.fillStyle = ctx.strokeStyle;
-          ctx.beginPath(); ctx.arc(lead.x + Math.cos(a) * d, lead.y + Math.sin(a) * d, 2.5, 0, TAU); ctx.fill();
+          ctx.beginPath(); ctx.arc(focus.x + Math.cos(a) * d, focus.y + Math.sin(a) * d, 2.5, 0, TAU); ctx.fill();
         }
       }
-      this.drawCar(lead, '#35d0ff', '#ffffff');
+      const fill = focus.alive || focus.status === 'finished' ? '#35d0ff' : '#e66767';
+      this.drawCar(focus, fill, '#ffffff');
+      if (picked) {
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5 / z * 1.5; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.arc(focus.x, focus.y, 20, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+      }
     }
     ctx.restore();
 
     // Fog: a mist that thickens beyond what the leader's sensors can see
-    if (P.f.fog > 0 && lead) {
-      const sx = (lead.x - this.cam.x) * z + this.w / 2, sy = (lead.y - this.cam.y) * z + this.h / 2;
+    if (P.f.fog > 0 && focus) {
+      const sx = (focus.x - this.cam.x) * z + this.w / 2, sy = (focus.y - this.cam.y) * z + this.h / 2;
       const rIn = P.sensorRange * z * 0.6, rOut = P.sensorRange * z * 1.6;
       const g = ctx.createRadialGradient(sx, sy, rIn, sx, sy, rOut);
       const a = Math.min(0.75, 0.12 * P.f.fog);
@@ -187,6 +196,35 @@ class Renderer {
       g.addColorStop(1, `rgba(210,215,222,${a})`);
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, this.w, this.h);
+    }
+  }
+
+  drawObstacle(o, ctx = this.ctx) {
+    if (o.type === 'cone') {
+      ctx.fillStyle = '#f07c1e';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r * 0.55, 0, TAU); ctx.stroke();
+    } else if (o.type === 'rock') {
+      ctx.fillStyle = '#7d7f86';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#9a9ca3';
+      ctx.beginPath(); ctx.arc(o.x - o.r * 0.25, o.y - o.r * 0.25, o.r * 0.55, 0, TAU); ctx.fill();
+    } else if (o.type === 'ped') {
+      ctx.fillStyle = '#ffd23f';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#6b3fa0';
+      ctx.beginPath(); ctx.arc(o.x, o.y, o.r * 0.5, 0, TAU); ctx.fill();
+    } else {
+      ctx.save();
+      ctx.translate(o.x, o.y); ctx.rotate(o.h || 0);
+      ctx.fillStyle = o.type === 'parked' ? '#8a96a8' : `hsl(${o.hue},35%,62%)`;
+      roundRect(ctx, -11, -6, 22, 12, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(20,30,40,0.7)'; ctx.fillRect(2, -4.5, 4, 9);
+      ctx.fillStyle = o.type === 'parked' ? '#ffb020' : '#ffe9a8';     // parked cars show hazard lights
+      ctx.fillRect(9, -5, 2, 3); ctx.fillRect(9, 2, 2, 3);
+      if (o.type === 'parked') { ctx.fillRect(-11, -5, 2, 3); ctx.fillRect(-11, 2, 2, 3); }
+      ctx.restore();
     }
   }
 
