@@ -194,6 +194,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .events .warn { color: var(--warn); }
 .events .bad { color: var(--danger); font-weight: 600; }
 .events .good { color: var(--good); font-weight: 600; }
+.events .learn { color: var(--accent); }
+.chip.on { color: var(--accent); }
+.chip.off { color: var(--text-muted); }
 
 /* ---- fleet */
 .obar { display: flex; gap: 2px; height: 16px; background: var(--surface); border-radius: 6px; overflow: hidden; }

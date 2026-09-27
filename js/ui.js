@@ -44,6 +44,7 @@ function save() {
       settings: {
         popSize: sim.popSize, mutRate: sim.mutRate, mutStrength: sim.mutStrength,
         autoAdvance: sim.autoAdvance, advanceThreshold: sim.advanceThreshold, newTrackEachGen: sim.newTrackEachGen,
+        learnOn: sim.learnOn, learnRate: sim.learnRate,
       },
       champion: sim.champion && { brain: sim.champion.brain.toJSON(), safety: sim.champion.safety, level: sim.champion.level, gen: sim.champion.gen },
     };
@@ -226,6 +227,13 @@ function refreshPanel(full) {
     stat('Best safety', last ? last.best.toFixed(0) : '–') +
     stat('Fleet safety', last ? last.avg.toFixed(0) : '–') +
     stat('Level record', sim.bestSafetyOnLevel ? sim.bestSafetyOnLevel.toFixed(0) : '–');
+  const lc = $('learnChip');
+  lc.className = 'chip ' + (sim.learnOn ? 'on' : 'off');
+  lc.textContent = sim.learnOn ? 'Learning' : 'Off';
+  $('learnStats').innerHTML =
+    gauge('Mistakes this generation', sim.mistakesThisGen) +
+    gauge('Lessons taught this generation', sim.lessonsThisGen.toLocaleString()) +
+    gauge('Lessons remembered', sim.memory.length);
   $('lvl').textContent = sim.level;
   for (const f of FACTORS) {
     const lv = sim.params.f[f.key], b = sim.bonus[f.key];
@@ -258,6 +266,7 @@ function refreshHud() {
   $('hud').innerHTML =
     `<div class="big">Generation ${sim.generation} · Level ${sim.level}</div>` +
     `<div class="sub">${sim.aliveCount} driving · ${sim.finishedCount} finished · ${sim.time.toFixed(1)}s / ${sim.timeLimit.toFixed(0)}s</div>` +
+    (sim.learnOn ? `<div class="sub">Fleet has learned from ${sim.mistakesThisGen} mistake${sim.mistakesThisGen === 1 ? '' : 's'} this generation</div>` : '') +
     (f ? `<div class="sub">${picked ? `Watching car ${f.id}` : 'Leader'}: ${Math.round(f.speed)} px/s · ${lapPct(f).toFixed(0)}% of lap · ${f.alive ? 'driving' : f.cause}</div>` : '');
 }
 
@@ -330,7 +339,7 @@ function refreshMonitor(force) {
     gauge('Lap done', `${lapPct(c).toFixed(0)}%`) +
     gauge('Safety so far', sim.liveSafety(c).toFixed(0)) +
     gauge('Close calls', `${c.nearMiss.toFixed(1)}s`) +
-    gauge('Jerky steering', c.harsh.toFixed(1)) +
+    gauge('Lessons learned', c.lessons) +
     gauge('Nearest thing', clr);
   setBar('barSteer', c.steer);
   $('valSteer').textContent = Math.abs(c.steer) < 0.05 ? 'straight' : `${Math.round(Math.abs(c.steer) * 100)}% ${c.steer < 0 ? 'left' : 'right'}`;
@@ -568,6 +577,9 @@ document.addEventListener('paste', e => {
 
 // Two-step confirmation built into the button (no browser pop-up needed).
 let resetArmed = 0;
+$('learnOn').addEventListener('change', e => { sim.learnOn = e.target.checked; refreshPanel(false); save(); });
+$('btnForgetLessons').addEventListener('click', () => { sim.memory = []; refreshPanel(false); toast('Saved lessons forgotten. The brains keep what they already learned.'); });
+
 $('btnResetBrains').addEventListener('click', () => {
   const btn = $('btnResetBrains');
   if (!resetArmed) {
@@ -581,7 +593,7 @@ $('btnResetBrains').addEventListener('click', () => {
   try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ }
   sim.level = 1;
   for (const f of FACTORS) sim.bonus[f.key] = 0;
-  sim.history = []; sim.log = []; sim.generation = 1; sim.bestSafetyOnLevel = 0;
+  sim.history = []; sim.log = []; sim.generation = 1; sim.bestSafetyOnLevel = 0; sim.memory = [];
   sim.trackSeed = Math.floor(Math.random() * 1e9);
   sim.buildWorld();
   sim.resetBrains();
@@ -608,6 +620,8 @@ $('thrVal').textContent = sim.advanceThreshold;
 bindSlider('pop', 'popSize', v => v);
 bindSlider('mr', 'mutRate', v => (+v).toFixed(2));
 bindSlider('ms', 'mutStrength', v => (+v).toFixed(2));
+bindSlider('lr', 'learnRate', v => (+v).toFixed(3));
+$('learnOn').checked = sim.learnOn;
 setSpeed(speed);
 if (!restored && document.querySelector('.stage').getBoundingClientRect().width < 600) showMap = false;
 toggleMap(showMap);

@@ -23,6 +23,9 @@ class NeuralNet {
       }
     }
     this.acts = sizes.map(s => new Float32Array(s));
+    this.deltas = sizes.map(s => new Float32Array(s));
+    this.offsets = [];
+    for (let l = 0, o = 0; l < sizes.length - 1; l++) { this.offsets.push(o); o += (sizes[l] + 1) * sizes[l + 1]; }
   }
 
   static paramCount(sizes) {
@@ -49,6 +52,31 @@ class NeuralNet {
   }
 
   clone() { return new NeuralNet(this.sizes, this.w); }
+
+  // One step of gradient descent (backpropagation, squared error) towards
+  // `target` for this input. This is how a car learns from a lesson.
+  train(input, target, lr) {
+    const sizes = this.sizes, w = this.w, acts = this.acts, deltas = this.deltas, L = sizes.length;
+    const out = this.forward(input);
+    let delta = deltas[L - 1];
+    for (let j = 0; j < sizes[L - 1]; j++) delta[j] = (out[j] - target[j]) * (1 - out[j] * out[j]);
+    for (let l = L - 2; l >= 0; l--) {
+      const inp = sizes[l], outN = sizes[l + 1], prev = acts[l], base = this.offsets[l];
+      const back = l > 0 ? deltas[l] : null;
+      if (back) back.fill(0);
+      for (let j = 0; j < outN; j++) {
+        const d = delta[j], o = base + j * (inp + 1);
+        if (d === 0) continue;
+        for (let i = 0; i < inp; i++) {
+          if (back) back[i] += w[o + i] * d;
+          w[o + i] = clamp(w[o + i] - lr * d * prev[i], -5, 5);
+        }
+        w[o + inp] = clamp(w[o + inp] - lr * d, -5, 5);
+      }
+      if (back) for (let i = 0; i < inp; i++) back[i] *= 1 - prev[i] * prev[i];
+      delta = back;
+    }
+  }
 
   mutate(rate, strength) {
     const w = this.w;

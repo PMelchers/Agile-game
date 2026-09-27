@@ -15,20 +15,37 @@ Progress (level, history, and the best brain so far) is saved to
 
 ## How the cars learn
 
+Two kinds of learning work together.
+
+**1. Every car learns from every mistake, straight away.**
+Each car keeps a short memory of the last second of what its sensors saw and
+what it did. When any car crashes, stalls or has a close call, that second
+becomes a *lesson*: in that situation, brake earlier and steer towards open
+space (after a stall: keep driving). Within a fifth of a second, every car
+still driving trains its own brain on the new lesson with backpropagation,
+plus a few older lessons so it doesn't forget. Lessons are kept (up to 900
+situations), and each new generation studies them before it sets off. Watch
+for the blue ripple where a mistake happened and the flash of every car
+learning from it. You can switch this off, or change the lesson strength, on
+the Train tab.
+
+**2. Evolution keeps the best brains.**
 - **Sensors:** 9 distance rays (−90° to +90°), plus speed, lane position,
   heading relative to the road, and how sharply the road bends ahead.
 - **Brain:** a feed-forward network `13 → 16 → 12 → 2` (tanh). The two
   outputs are steering and gas/brake.
-- **Evolution (neuroevolution / genetic algorithm):**
+- After each generation:
   - The top 5% of cars carry over unchanged, and the all-time safest brain
     ("champion") is always kept.
   - Parents are picked by tournament from the top 40%, then combined with
     neuron-level crossover.
   - Half the children get small tweaks and half get bold mutations. If
     progress stalls, the bold half's mutation is boosted automatically.
-- **Mistakes are remembered:** every crash leaves a red ✕ on the road for the
-  current and previous generation, so you can see where the fleet is still
-  failing.
+
+Brains keep what they learned from mistakes when they're passed on, so
+lessons build up over generations. In side-by-side tests on the same tracks,
+learning from mistakes raised the whole fleet's average safety score at
+generation 5 from 32–37 to 88–92 (level 2) and from 5–13 to 33–70 (level 5).
 
 ### Safety score (0–100)
 

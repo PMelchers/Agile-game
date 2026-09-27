@@ -208,6 +208,25 @@ const NET_SHAPE = [NUM_INPUTS, 16, 12, 2];
 const TRACE_LEN = 300;       // samples kept per car (30 s at 10 Hz)
 const TRACE_EVERY = 6;       // sim steps between samples
 const TRACE_CH = 4;          // speed, steering, throttle, clearance
+const RECENT_LEN = 12;       // snapshots kept for lessons (1.2 s at 10 Hz)
+const RECENT_W = NUM_INPUTS + 2;
+const MEMORY_MAX = 900;      // lessons the fleet remembers
+
+// Turn one moment before a mistake into a lesson: "in this situation you
+// should have ...". x = what the sensors saw, s/t = the steering and
+// gas/brake the car chose, u = how close to the mistake (1 = the last moment).
+function lessonTarget(x, s, t, kind, u) {
+  if (kind === 'stalled') return [s, 0.9];                     // keep driving
+  let left = 0, right = 0;
+  for (let r = 0; r < 4; r++) left += x[r];                     // sensor value 1 = something touching
+  for (let r = 5; r < NUM_RAYS; r++) right += x[r];
+  const front = Math.max(x[3], x[4], x[5]);
+  const away = right > left ? -1 : 1;                           // steer towards the more open side
+  const steer = clamp(s + away * (0.45 + 0.55 * front) * u, -1, 1);
+  const fast = x[NUM_RAYS] > 0.35;                              // speed input, 1 = top speed
+  const gas = fast ? clamp(t - (0.3 + 0.6 * front) * u, -1, 1) : Math.max(t, 0.3);
+  return [steer, gas];
+}
 const STATUS_MUL = { finished: 1, driving: 0.85, timeout: 0.85, stalled: 0.7, crashed: 0.5, 'wrong-way': 0.5 };
 
 class Car {
@@ -233,6 +252,9 @@ class Car {
     this.outcome = '';
     this.trace = new Float32Array(TRACE_LEN * TRACE_CH);
     this.traceN = 0; this.steps = 0;
+    this.recent = new Float32Array(RECENT_LEN * RECENT_W);
+    this.recentN = 0;
+    this.lessons = 0; this.lessonsPending = 0; this.lastLearnLog = -9; this.learnedFrom = [];
     this.clearance = Infinity;
     this.events = [];
     this.ccActive = false; this.harshActive = false; this.brakeActive = false;
@@ -269,6 +291,17 @@ class Simulation {
     this.onEvent = null;
     this._near = [];
     this.trackSeed = opts.seed != null ? opts.seed : Math.floor(Math.random() * 1e9);
+    // Learning from mistakes: every crash, stall or close call becomes a
+    // lesson that every car still driving trains on straight away.
+    this.learnOn = true;
+    this.learnRate = 0.04;
+    this.memory = [];
+    this.mistakesThisGen = 0;
+    this.lessonsThisGen = 0;
+    this.lessonFx = [];
+    this.lastTeach = -9;
+    this._newMistakes = [];
+    this._teachTimer = 0;
     this.custom = [];
     this.customSeed = this.trackSeed;
     this.buildWorld();
@@ -318,6 +351,16 @@ class Simulation {
     updateObstacles(this.track, this.obstacles, 0);
     for (const o of this.obstacles) { o.px = o.x; o.py = o.y; o.ph = o.h; }
     this.cars.forEach((c, k) => { c.id = k + 1; c.reset(this.track); });
+    this.mistakesThisGen = 0;
+    this.lessonsThisGen = 0;
+    this.lessonFx = [];
+    this._newMistakes = [];
+    // Before setting off, every new car studies what the fleet has learned so far.
+    if (this.learnOn && this.memory.length) {
+      for (const c of this.cars) {
+        for (let k = 0; k < 24; k++) this.study(c.brain, this.memory[Math.floor(Math.random() * this.memory.length)]);
+      }
+    }
   }
 
   // ---- hand-placed obstacles ------------------------------------------------
@@ -366,6 +409,62 @@ class Simulation {
     this.custom = [];
   }
 
+  // ---- learning from mistakes --------------------------------------------
+  recordMistake(car, kind, cause) {
+    if (!this.learnOn) return;
+    const n = Math.min(car.recentN, RECENT_LEN);
+    if (!n) return;
+    const take = kind === 'close' ? Math.min(n, 4) : n;
+    const weight = kind === 'close' ? 0.4 : 1;
+    for (let k = 0; k < take; k++) {
+      const o = ((car.recentN - 1 - k) % RECENT_LEN) * RECENT_W;
+      const x = car.recent.slice(o, o + NUM_INPUTS);
+      const u = 1 - k / take;
+      const y = lessonTarget(x, car.recent[o + NUM_INPUTS], car.recent[o + NUM_INPUTS + 1], kind, u);
+      this.memory.push({ x, y, w: weight * (0.4 + 0.6 * u) });
+    }
+    if (this.memory.length > MEMORY_MAX) this.memory.splice(0, this.memory.length - MEMORY_MAX);
+    if (kind !== 'close') {
+      this.mistakesThisGen++;
+      this.lessonFx.push({ x: car.x, y: car.y, t: this.time });
+    }
+    this._newMistakes.push({ car: car.id, cause, kind });
+  }
+
+  study(brain, lesson) {
+    brain.train(lesson.x, lesson.y, this.learnRate * lesson.w);
+  }
+
+  // Every car still driving trains on the newest lessons (plus a few older
+  // ones, so it doesn't forget earlier mistakes).
+  teachFleet() {
+    this._teachTimer = 0;
+    const fresh = this._newMistakes;
+    this._newMistakes = [];
+    const mem = this.memory, n = mem.length;
+    if (!n) return;
+    const recent = Math.min(n, 12 * fresh.length + 12);
+    let taught = 0;
+    for (const c of this.cars) {
+      if (!c.alive) continue;
+      for (let k = 0; k < 6; k++) {
+        const idx = k < 4 ? n - 1 - Math.floor(Math.random() * recent) : Math.floor(Math.random() * n);
+        this.study(c.brain, mem[idx]);
+      }
+      c.lessons += fresh.length;
+      c.lessonsPending += fresh.length;
+      for (const f of fresh) if (c.learnedFrom.length < 3 && f.kind !== 'close') c.learnedFrom.push(`car ${f.car} (${f.cause})`);
+      if (c.t - c.lastLearnLog >= 1.5) {
+        const from = c.learnedFrom.length ? `: ${c.learnedFrom.join(', ')}${c.lessonsPending > c.learnedFrom.length ? '…' : ''}` : ' (close calls)';
+        c.logEvent('learn', `Learned from ${c.lessonsPending} mistake${c.lessonsPending === 1 ? '' : 's'}${from}`);
+        c.lastLearnLog = c.t; c.lessonsPending = 0; c.learnedFrom = [];
+      }
+      taught++;
+    }
+    this.lessonsThisGen += fresh.length * taught;
+    if (taught) this.lastTeach = this.time;
+  }
+
   // Safety score a car would get if it stopped right now.
   liveSafety(car) {
     if (!car.alive) return car.safety;
@@ -387,6 +486,8 @@ class Simulation {
     }
     this.aliveCount = alive;
     this.time += dt;
+    this._teachTimer += dt;
+    if (this._newMistakes.length && this._teachTimer >= 0.2) this.teachFleet();
     if (alive === 0 || this.time >= this.timeLimit) {
       this.endGeneration();
       return true;
@@ -434,6 +535,7 @@ class Simulation {
     const prevSteer = car.steer;
     car.steer += (out[0] - car.steer) * Math.min(1, dt * 10);
     car.throttle = out[1];
+    car.outSteer = out[0];
     const steerRate = Math.abs(car.steer - prevSteer) / dt;
     if (steerRate > 3) car.harsh += (steerRate - 3) * dt;
     if (steerRate > 6 && !car.harshActive) car.logEvent('warn', `Jerky steering (${car.steer < 0 ? 'left' : 'right'})`);
@@ -497,13 +599,23 @@ class Simulation {
         if (dist - o.r < closeGap) { closeGap = dist - o.r; closeKind = o.type; }
       }
     }
-    if (closeKind && !car.ccActive) car.logEvent('warn', `Close call with ${CLOSE_LABEL[closeKind]} (${Math.max(0, closeGap).toFixed(0)}px)`);
+    if (closeKind && !car.ccActive) {
+      car.logEvent('warn', `Close call with ${CLOSE_LABEL[closeKind]} (${Math.max(0, closeGap).toFixed(0)}px)`);
+      this.recordMistake(car, 'close', `close call with ${CLOSE_LABEL[closeKind]}`);
+    }
     car.ccActive = !!closeKind;
 
     // --- Telemetry
     let clr = Infinity;
     for (let r = 0; r < NUM_RAYS; r++) if (car.rayLen[r] < clr) clr = car.rayLen[r];
     car.clearance = clr;
+    if (car.steps % TRACE_EVERY === 0) {             // snapshot for lessons
+      const o = (car.recentN % RECENT_LEN) * RECENT_W;
+      car.recent.set(car.inputs, o);
+      car.recent[o + NUM_INPUTS] = car.outSteer;
+      car.recent[o + NUM_INPUTS + 1] = car.throttle;
+      car.recentN++;
+    }
     if (car.steps++ % TRACE_EVERY === 0) {
       const o = (car.traceN % TRACE_LEN) * TRACE_CH;
       car.trace[o] = car.speed; car.trace[o + 1] = car.steer; car.trace[o + 2] = car.throttle; car.trace[o + 3] = clr;
@@ -528,6 +640,7 @@ class Simulation {
     car.cause = cause;
     car.outcome = outcome;
     car.px = car.x; car.py = car.y; car.ph = car.h;
+    if (status === 'crashed' || status === 'stalled') this.recordMistake(car, status, cause);
     if (status === 'crashed' || status === 'stalled' || status === 'wrong-way') {
       this.crashMarks.push({
         x: car.x, y: car.y, key: outcome, cause, car: car.id, gen: this.generation, t: car.t,

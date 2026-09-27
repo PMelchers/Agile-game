@@ -146,6 +146,16 @@ class Renderer {
     this.drawCrashes(sim.prevCrashMarks, 0.25, view);
     this.drawCrashes(sim.crashMarks, 0.85, view);
 
+    // A ripple at each fresh mistake: the moment it became a lesson for the fleet.
+    for (const fx of sim.lessonFx) {
+      const age = sim.time - fx.t;
+      if (age > 1.2 || age < 0 || !inView(fx.x, fx.y)) continue;
+      const k = age / 1.2;
+      ctx.strokeStyle = `rgba(53,208,255,${0.8 * (1 - k)})`;
+      ctx.lineWidth = 2.5 * (1 - k) + 0.5;
+      ctx.beginPath(); ctx.arc(fx.x, fx.y, 8 + 70 * k, 0, TAU); ctx.stroke();
+    }
+
     // Obstacles
     for (const o of sim.obstacles) {
       if (!inView(o.x, o.y)) continue;
@@ -171,12 +181,14 @@ class Renderer {
       ctx.globalAlpha = 1;
     }
 
-    // Cars: the crowd first, then the watched car on top with its sensors
+    // Cars: the crowd first, then the watched car on top with its sensors.
+    // Every driving car flashes briefly when it learns from a mistake.
+    const learning = sim.learnOn && sim.time - sim.lastTeach < 0.18;
     for (const c of sim.cars) {
       if (!c.alive || c === focus || !inView(c.x, c.y)) continue;
       // Cars that stop making progress fade out, so dawdlers don't clutter the view.
       ctx.globalAlpha = clamp(1 - (c.t - c.lastGain - 0.8) / 2.5, 0.2, 1);
-      this.drawCar(c, 'rgba(120,190,255,0.45)', null);
+      this.drawCar(c, learning ? 'rgba(190,235,255,0.85)' : 'rgba(120,190,255,0.45)', learning ? 'rgba(53,208,255,0.9)' : null);
     }
     ctx.globalAlpha = 1;
     for (const c of sim.cars) {

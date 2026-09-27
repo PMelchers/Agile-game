@@ -72,6 +72,18 @@
 
       <section class="card">
         <div class="card-head">
+          <h2>Learning from mistakes</h2>
+          <span class="chip" id="learnChip"></span>
+        </div>
+        <label class="row check"><input type="checkbox" id="learnOn" checked> Every car learns the moment any car makes a mistake</label>
+        <label class="slider">Lesson strength <b id="lrVal"></b><input type="range" id="lr" min="0.005" max="0.12" step="0.005"></label>
+        <div class="gauges" id="learnStats"></div>
+        <p class="hint">When a car crashes, stalls or has a close call, the last second of what it saw and did becomes a lesson: in that situation, brake earlier and steer towards open space (or, after a stall, keep driving). Every car still driving trains its brain on that lesson straight away, and each new generation studies the saved lessons before it sets off. Evolution then keeps the brains that drive best.</p>
+        <div class="btn-row"><button id="btnForgetLessons" class="btn">Forget saved lessons</button></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
           <h2>Difficulty</h2>
           <div class="stepper big">
             <button id="lvlDown" aria-label="Lower level">−</button>
