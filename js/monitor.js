@@ -380,7 +380,8 @@ class OutcomeChart {
           OUTCOMES.slice().reverse().map(o => {
             const c = d.outcomes[o.key];
             return c ? `<span class="dot" style="background:var(${o.color})"></span>${o.label} <b>${c}</b> (${Math.round(c / d.pop * 100)}%)` : '';
-          }).filter(Boolean).join('<br>');
+          }).filter(Boolean).join('<br>') +
+          (d.safeWaits != null ? `<br>Safe waits for pedestrians or cars: <b>${d.safeWaits}</b>` : '');
         const tw = this.tip.offsetWidth;
         this.tip.style.left = clamp(pad.l + i * slot - tw / 2, 0, W - tw) + 'px';
         this.tip.style.top = '-6px';
