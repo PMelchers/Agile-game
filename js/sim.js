@@ -164,24 +164,34 @@ const OBSTACLE_CAUSE = {
 };
 const CLOSE_LABEL = { barrier: 'barrier', cone: 'cone', rock: 'rock', ped: 'pedestrian', traffic: 'car', parked: 'parked car' };
 
+// Where an obstacle is at time t. Moving obstacles are pure functions of
+// time, which is also what lets a mistake be replayed exactly.
+const _pos = { x: 0, y: 0, h: 0 };
+function obstaclePosAt(track, o, t) {
+  if (o.type === 'ped') {
+    const s = Math.sin(o.phase0 + (t * o.speed) / o.amp) * o.amp;
+    _pos.x = track.x[o.i] + track.nx[o.i] * s;
+    _pos.y = track.y[o.i] + track.ny[o.i] * s;
+    _pos.h = 0;
+  } else if (o.type === 'traffic') {
+    const N = track.N, L = track.length;
+    let s = (o.s0 + o.dir * o.speed * t) % L;
+    if (s < 0) s += L;
+    const fi = s / TRACK_SPACING, i = Math.floor(fi) % N, j = (i + 1) % N, f = fi - Math.floor(fi);
+    _pos.x = track.x[i] + (track.x[j] - track.x[i]) * f + track.nx[i] * o.lane;
+    _pos.y = track.y[i] + (track.y[j] - track.y[i]) * f + track.ny[i] * o.lane;
+    _pos.h = track.ang[i] + (o.dir < 0 ? Math.PI : 0);
+  } else {
+    _pos.x = o.x; _pos.y = o.y; _pos.h = o.h || 0;
+  }
+  return _pos;
+}
+
 function updateObstacles(track, obs, t) {
-  const N = track.N, L = track.length;
   for (const o of obs) {
-    if (o.type === 'ped') {
-      const phase = o.phase0 + (t * o.speed) / o.amp;
-      const s = Math.sin(phase) * o.amp;
-      o.x = track.x[o.i] + track.nx[o.i] * s;
-      o.y = track.y[o.i] + track.ny[o.i] * s;
-      o.moving = Math.cos(phase) >= 0 ? 1 : -1;
-    } else if (o.type === 'traffic') {
-      let s = (o.s0 + o.dir * o.speed * t) % L;
-      if (s < 0) s += L;
-      const fi = s / TRACK_SPACING, i = Math.floor(fi) % N, j = (i + 1) % N, f = fi - Math.floor(fi);
-      const cx = track.x[i] + (track.x[j] - track.x[i]) * f, cy = track.y[i] + (track.y[j] - track.y[i]) * f;
-      o.x = cx + track.nx[i] * o.lane;
-      o.y = cy + track.ny[i] * o.lane;
-      o.h = track.ang[i] + (o.dir < 0 ? Math.PI : 0);
-    }
+    if (o.type !== 'ped' && o.type !== 'traffic') continue;
+    const p = obstaclePosAt(track, o, t);
+    o.x = p.x; o.y = p.y; o.h = p.h;
   }
 }
 
@@ -201,26 +211,113 @@ function rayCircle(ox, oy, dx, dy, cx, cy, r) {
 const CAR_L = 22, CAR_W = 11;
 const CLOSE_CALL = 10;   // px of clearance below which a pass counts as a close call
 const MAX_SPEED = 280, ACCEL = 240, BRAKE = 520, DRAG = 0.3, STEER_RATE = 3.0;
-const RAY_ANGLES = [-90, -55, -30, -12, 0, 12, 30, 55, 90].map(d => d * Math.PI / 180);
-const NUM_RAYS = RAY_ANGLES.length;
-const NUM_INPUTS = NUM_RAYS + 4;
-const NET_SHAPE = [NUM_INPUTS, 16, 12, 2];
+// Sensor lines fan out from -90° to +90°, packed more densely towards the
+// front. The count is adjustable, so these are set by setSensorCount().
+const LEGACY_RAY_DEG = [-90, -55, -30, -12, 0, 12, 30, 55, 90];   // layout used by saves before sensors were adjustable
+const SENSOR_MIN = 5, SENSOR_MAX = 31, SENSOR_DEFAULT = 15;
+const HIDDEN_SHAPE = [16, 12, 2];
+const SNAP_STATE = 9;        // x, y, h, vx, vy, speed, steer, idx, time
+let RAY_ANGLES, NUM_RAYS, NUM_INPUTS, NET_SHAPE, RECENT_W;
+function rayAnglesFor(n) {
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const t = n === 1 ? 0 : -1 + (2 * k) / (n - 1);
+    out.push(Math.sign(t) * Math.pow(Math.abs(t), 1.35) * Math.PI / 2);
+  }
+  return out;
+}
+function setSensorCount(n) {
+  n = clamp(Math.round(n), SENSOR_MIN, SENSOR_MAX);
+  if (n % 2 === 0) n++;                                      // odd, so one line looks straight ahead
+  RAY_ANGLES = rayAnglesFor(n);
+  NUM_RAYS = n;
+  NUM_INPUTS = n + 4;
+  NET_SHAPE = [NUM_INPUTS, ...HIDDEN_SHAPE];
+  RECENT_W = NUM_INPUTS + 2 + SNAP_STATE;
+  return n;
+}
+setSensorCount(SENSOR_DEFAULT);
+
+// Rebuild a brain for a different set of sensor lines. Each new line takes
+// the connections of the nearest old line (shared out if several new lines
+// map onto one), so the car keeps what it had learned.
+function remapBrain(net, oldAngles, newAngles) {
+  const oldRays = oldAngles.length, newRays = newAngles.length;
+  const oldIn = net.sizes[0], extra = oldIn - oldRays, newIn = newRays + extra, H = net.sizes[1];
+  const out = new NeuralNet([newIn, ...net.sizes.slice(1)]);
+  const near = newAngles.map(a => {
+    let b = 0;
+    for (let k = 1; k < oldRays; k++) if (Math.abs(oldAngles[k] - a) < Math.abs(oldAngles[b] - a)) b = k;
+    return b;
+  });
+  const count = new Array(oldRays).fill(0);
+  near.forEach(k => count[k]++);
+  for (let j = 0; j < H; j++) {
+    const oo = j * (oldIn + 1), no = j * (newIn + 1);
+    for (let r = 0; r < newRays; r++) out.w[no + r] = net.w[oo + near[r]] / count[near[r]];
+    for (let e = 0; e < extra; e++) out.w[no + newRays + e] = net.w[oo + oldRays + e];
+    out.w[no + newIn] = net.w[oo + oldIn];
+  }
+  out.w.set(net.w.subarray((oldIn + 1) * H), (newIn + 1) * H);
+  return out;
+}
+
+// Make a saved or imported brain fit the current sensor lines. `savedSensors`
+// is the sensor count stored with it (missing for brains from before
+// sensors were adjustable, which used LEGACY_RAY_DEG).
+function adaptBrain(brain, savedSensors) {
+  if (brain.sizes.slice(1).join() !== HIDDEN_SHAPE.join() || brain.sizes[0] < 5) {
+    throw new Error('This brain has a different network shape.');
+  }
+  const rays = brain.sizes[0] - 4;
+  const angles = !savedSensors && rays === 9 ? LEGACY_RAY_DEG.map(d => d * Math.PI / 180) : rayAnglesFor(rays);
+  if (savedSensors === rays && rays === NUM_RAYS) return brain;
+  return remapBrain(brain, angles, RAY_ANGLES);
+}
+
+// Car physics, shared by the real cars and by mistake replays.
+function drivePhysics(c, steerOut, throttle, dt, grip) {
+  c.steer += (steerOut - c.steer) * Math.min(1, dt * 10);   // steering has a little actuator lag
+  c.h += c.steer * STEER_RATE * dt * Math.min(1, c.speed / 80);
+  const fx = Math.cos(c.h), fy = Math.sin(c.h);
+  let vf = c.vx * fx + c.vy * fy;
+  let lx = c.vx - fx * vf, ly = c.vy - fy * vf;
+  vf += (throttle >= 0 ? throttle * ACCEL : throttle * BRAKE) * dt;
+  vf -= vf * DRAG * dt;
+  vf = clamp(vf, 0, MAX_SPEED);
+  const keep = Math.exp(-grip * 12 * dt);                  // low grip → the car slides
+  lx *= keep; ly *= keep;
+  c.vx = fx * vf + lx; c.vy = fy * vf + ly;
+  c.speed = vf;
+  c.x += c.vx * dt; c.y += c.vy * dt;
+}
+
+// Distance from an obstacle to the car's body (0 or less = touching).
+function carGap(cx, cy, c, s, ox, oy, r) {
+  const dx = ox - cx, dy = oy - cy;
+  const lxo = dx * c + dy * s, lyo = -dx * s + dy * c;
+  const px = clamp(lxo, -CAR_L / 2, CAR_L / 2), py = clamp(lyo, -CAR_W / 2, CAR_W / 2);
+  return Math.hypot(lxo - px, lyo - py) - r;
+}
 const TRACE_LEN = 300;       // samples kept per car (30 s at 10 Hz)
 const TRACE_EVERY = 6;       // sim steps between samples
 const TRACE_CH = 4;          // speed, steering, throttle, clearance
 const RECENT_LEN = 12;       // snapshots kept for lessons (1.2 s at 10 Hz)
-const RECENT_W = NUM_INPUTS + 2;
-const MEMORY_MAX = 900;      // lessons the fleet remembers
+const MEMORY_MAX = 1500;     // lessons the fleet remembers
+const REPLAY_STEER = [-1, -0.5, 0, 0.5, 1];
+const REPLAY_GAS = [-0.7, 0.15, 0.8];
 
 // Turn one moment before a mistake into a lesson: "in this situation you
 // should have ...". x = what the sensors saw, s/t = the steering and
 // gas/brake the car chose, u = how close to the mistake (1 = the last moment).
 function lessonTarget(x, s, t, kind, u) {
   if (kind === 'stalled') return [s, 0.9];                     // keep driving
-  let left = 0, right = 0;
-  for (let r = 0; r < 4; r++) left += x[r];                     // sensor value 1 = something touching
-  for (let r = 5; r < NUM_RAYS; r++) right += x[r];
-  const front = Math.max(x[3], x[4], x[5]);
+  let left = 0, right = 0, front = 0;
+  for (let r = 0; r < NUM_RAYS; r++) {                          // sensor value 1 = something touching
+    const a = RAY_ANGLES[r];
+    if (a < -0.05) left += x[r]; else if (a > 0.05) right += x[r];
+    if (Math.abs(a) < 0.3) front = Math.max(front, x[r]);
+  }
   const away = right > left ? -1 : 1;                           // steer towards the more open side
   const steer = clamp(s + away * (0.45 + 0.55 * front) * u, -1, 1);
   const fast = x[NUM_RAYS] > 0.35;                              // speed input, 1 = top speed
@@ -294,7 +391,7 @@ class Simulation {
     // Learning from mistakes: every crash, stall or close call becomes a
     // lesson that every car still driving trains on straight away.
     this.learnOn = true;
-    this.learnRate = 0.04;
+    this.learnRate = 0.05;
     this.memory = [];
     this.mistakesThisGen = 0;
     this.lessonsThisGen = 0;
@@ -302,6 +399,10 @@ class Simulation {
     this.lastTeach = -9;
     this._newMistakes = [];
     this._teachTimer = 0;
+    this._queue = [];
+    this._replayNear = [];
+    this._ghost = { x: 0, y: 0, h: 0, vx: 0, vy: 0, speed: 0, steer: 0 };
+    this.replayWins = 0;
     this.custom = [];
     this.customSeed = this.trackSeed;
     this.buildWorld();
@@ -355,10 +456,11 @@ class Simulation {
     this.lessonsThisGen = 0;
     this.lessonFx = [];
     this._newMistakes = [];
+    this._queue = [];
     // Before setting off, every new car studies what the fleet has learned so far.
     if (this.learnOn && this.memory.length) {
       for (const c of this.cars) {
-        for (let k = 0; k < 24; k++) this.study(c.brain, this.memory[Math.floor(Math.random() * this.memory.length)]);
+        for (let k = 0; k < 40; k++) this.study(c.brain, this.memory[Math.floor(Math.random() * this.memory.length)]);
       }
     }
   }
@@ -410,25 +512,111 @@ class Simulation {
   }
 
   // ---- learning from mistakes --------------------------------------------
+  // A mistake is queued with snapshots from 0.9 s, 0.5 s and 0.2 s before it.
+  // processMistakes() replays each snapshot with other choices to find what
+  // would have worked, and that becomes the lesson every car learns.
   recordMistake(car, kind, cause) {
     if (!this.learnOn) return;
     const n = Math.min(car.recentN, RECENT_LEN);
     if (!n) return;
-    const take = kind === 'close' ? Math.min(n, 4) : n;
-    const weight = kind === 'close' ? 0.4 : 1;
-    for (let k = 0; k < take; k++) {
+    const backs = kind === 'close' ? [2] : kind === 'stalled' ? [0, 3] : [9, 5, 2];
+    const snaps = [];
+    for (const k of backs) {
+      if (k >= n) continue;
       const o = ((car.recentN - 1 - k) % RECENT_LEN) * RECENT_W;
-      const x = car.recent.slice(o, o + NUM_INPUTS);
-      const u = 1 - k / take;
-      const y = lessonTarget(x, car.recent[o + NUM_INPUTS], car.recent[o + NUM_INPUTS + 1], kind, u);
-      this.memory.push({ x, y, w: weight * (0.4 + 0.6 * u) });
+      snaps.push({ rec: car.recent.slice(o, o + RECENT_W), u: 1 - k / RECENT_LEN });
     }
-    if (this.memory.length > MEMORY_MAX) this.memory.splice(0, this.memory.length - MEMORY_MAX);
+    if (!snaps.length) return;
+    if (this._queue.length >= 60) this._queue.shift();          // too many at once: drop the oldest
+    this._queue.push({ car: car.id, kind, cause, snaps });
     if (kind !== 'close') {
       this.mistakesThisGen++;
       this.lessonFx.push({ x: car.x, y: car.y, t: this.time });
     }
-    this._newMistakes.push({ car: car.id, cause, kind });
+  }
+
+  processMistakes(budgetMs) {
+    const t0 = performance.now();
+    let done = 0;
+    while (this._queue.length && (done === 0 || performance.now() - t0 < budgetMs)) {
+      const m = this._queue.shift();
+      for (const sn of m.snaps) {
+        const rec = sn.rec, x = rec.slice(0, NUM_INPUTS), s = rec[NUM_INPUTS], t = rec[NUM_INPUTS + 1];
+        let y = null, w;
+        if (m.kind !== 'stalled') {
+          const best = this.replay(rec);
+          if (best) { y = best; w = (m.kind === 'close' ? 0.5 : 1) * (0.5 + 0.5 * sn.u); this.replayWins++; }
+        }
+        if (!y) {                                                // no replay found a way out: fall back to the rule of thumb
+          y = lessonTarget(x, s, t, m.kind, sn.u);
+          w = (m.kind === 'close' ? 0.3 : 0.6) * (0.5 + 0.5 * sn.u);
+        }
+        this.memory.push({ x, y, w });
+      }
+      this._newMistakes.push(m);
+      done++;
+    }
+    if (this.memory.length > MEMORY_MAX) this.memory.splice(0, this.memory.length - MEMORY_MAX);
+  }
+
+  // Try every candidate choice from a saved moment and return the one that
+  // stays safest while still making progress (or null if all of them crash).
+  replay(rec) {
+    const b = NUM_INPUTS + 2;
+    const start = { x: rec[b], y: rec[b + 1], h: rec[b + 2], vx: rec[b + 3], vy: rec[b + 4], speed: rec[b + 5], steer: rec[b + 6] };
+    const idx0 = rec[b + 7] | 0, time0 = rec[b + 8];
+    const near = this._replayNear;
+    near.length = 0;
+    for (const o of this.obstacles) {
+      if ((o.x - start.x) ** 2 + (o.y - start.y) ** 2 < 520 * 520) near.push(o);
+    }
+    let best = null, bestScore = -Infinity;
+    for (const gs of REPLAY_GAS) {
+      for (const ss of REPLAY_STEER) {
+        const sc = this.imagine(start, idx0, time0, ss, gs, near);
+        if (sc > bestScore) { bestScore = sc; best = [ss, gs]; }
+      }
+    }
+    return bestScore > -500 ? best : null;
+  }
+
+  // Simulate 1.4 s from a saved moment: hold one choice for 0.5 s, then drive
+  // calmly along the road. Score = progress + clearance kept; a crash scores low.
+  imagine(start, idx0, time0, steerT, gasT, near) {
+    const tr = this.track, P = this.params, N = tr.N, dt = 1 / 60, st = this._ghost;
+    st.x = start.x; st.y = start.y; st.h = start.h; st.vx = start.vx; st.vy = start.vy; st.speed = start.speed; st.steer = start.steer;
+    let idx = idx0, prog = 0, minGap = 20, off = 0;
+    for (let k = 0; k < 84; k++) {
+      let sT = steerT, gT = gasT;
+      if (k >= 30) {
+        const la = (idx + 6) % N;
+        sT = clamp(2.2 * Math.sin(wrapAngle(tr.ang[la] - st.h)) - 0.02 * off, -1, 1);
+        gT = 0.3;
+      }
+      drivePhysics(st, sT, gT, dt, P.grip);
+      const ni = nearestIndex(tr, st.x, st.y, idx, 6, 14);
+      let d = ni - idx;
+      if (d < -N / 2) d += N; else if (d > N / 2) d -= N;
+      prog += d; idx = ni;
+      const nx = tr.nx[idx], ny = tr.ny[idx];
+      off = (st.x - tr.x[idx]) * nx + (st.y - tr.y[idx]) * ny;
+      const c = Math.cos(st.h), s = Math.sin(st.h);
+      let edge = 0;
+      for (let q = 0; q < 4; q++) {
+        const lxc = (q & 1 ? 1 : -1) * CAR_L / 2, lyc = (q & 2 ? 1 : -1) * CAR_W / 2;
+        edge = Math.max(edge, Math.abs(off + (c * lxc - s * lyc) * nx + (s * lxc + c * lyc) * ny));
+      }
+      if (edge > tr.hw) return -1000 + k;
+      minGap = Math.min(minGap, tr.hw - edge);
+      const tt = time0 + (k + 1) * dt;
+      for (let q = 0; q < near.length; q++) {
+        const o = near[q], p = obstaclePosAt(tr, o, tt);
+        const g = carGap(st.x, st.y, c, s, p.x, p.y, o.r);
+        if (g < 0) return -1000 + k;
+        if (g < minGap) minGap = g;
+      }
+    }
+    return prog * TRACK_SPACING + Math.min(minGap, 15) * 8;
   }
 
   study(brain, lesson) {
@@ -443,12 +631,12 @@ class Simulation {
     this._newMistakes = [];
     const mem = this.memory, n = mem.length;
     if (!n) return;
-    const recent = Math.min(n, 12 * fresh.length + 12);
+    const recent = Math.min(n, 3 * fresh.length + 6);
     let taught = 0;
     for (const c of this.cars) {
       if (!c.alive) continue;
-      for (let k = 0; k < 6; k++) {
-        const idx = k < 4 ? n - 1 - Math.floor(Math.random() * recent) : Math.floor(Math.random() * n);
+      for (let k = 0; k < 10; k++) {
+        const idx = k < 7 ? n - 1 - Math.floor(Math.random() * recent) : Math.floor(Math.random() * n);
         this.study(c.brain, mem[idx]);
       }
       c.lessons += fresh.length;
@@ -463,6 +651,18 @@ class Simulation {
     }
     this.lessonsThisGen += fresh.length * taught;
     if (taught) this.lastTeach = this.time;
+  }
+
+  // Change how many sensor lines every car has; brains are adapted, not reset.
+  setSensors(n) {
+    const oldA = RAY_ANGLES;
+    setSensorCount(n);
+    if (RAY_ANGLES.length === oldA.length) return false;
+    this.cars = this.cars.map(c => new Car(remapBrain(c.brain, oldA, RAY_ANGLES)));
+    if (this.champion) this.champion.brain = remapBrain(this.champion.brain, oldA, RAY_ANGLES);
+    this.memory = [];
+    this.startGeneration();
+    return true;
   }
 
   // Safety score a car would get if it stopped right now.
@@ -487,6 +687,7 @@ class Simulation {
     this.aliveCount = alive;
     this.time += dt;
     this._teachTimer += dt;
+    if (this._queue.length) this.processMistakes(1.2);
     if (this._newMistakes.length && this._teachTimer >= 0.2) this.teachFleet();
     if (alive === 0 || this.time >= this.timeLimit) {
       this.endGeneration();
@@ -531,9 +732,20 @@ class Simulation {
     inp[NUM_RAYS + 3] = clamp(wrapAngle(tr.ang[(car.idx + 18) % N] - tr.ang[car.idx]) / 1.2, -1, 1);
     const out = car.brain.forward(inp);
 
-    // --- Act (steering has a little actuator lag, like a real rack)
+    // Snapshot of this moment (what it saw, what it chose, where it was), kept
+    // for 1.2 s so a mistake can be replayed from here.
+    if (car.steps % TRACE_EVERY === 0) {
+      const o = (car.recentN % RECENT_LEN) * RECENT_W, r = car.recent, b = o + NUM_INPUTS;
+      r.set(inp, o);
+      r[b] = out[0]; r[b + 1] = out[1];
+      r[b + 2] = car.x; r[b + 3] = car.y; r[b + 4] = car.h; r[b + 5] = car.vx; r[b + 6] = car.vy;
+      r[b + 7] = car.speed; r[b + 8] = car.steer; r[b + 9] = car.idx; r[b + 10] = this.time;
+      car.recentN++;
+    }
+
+    // --- Act
     const prevSteer = car.steer;
-    car.steer += (out[0] - car.steer) * Math.min(1, dt * 10);
+    drivePhysics(car, out[0], out[1], dt, P.grip);
     car.throttle = out[1];
     car.outSteer = out[0];
     const steerRate = Math.abs(car.steer - prevSteer) / dt;
@@ -542,19 +754,6 @@ class Simulation {
     car.harshActive = steerRate > 4;
     if (car.throttle < -0.5 && !car.brakeActive && car.speed > 60) car.logEvent('info', `Braked hard at ${Math.round(car.speed)} px/s`);
     car.brakeActive = car.throttle < -0.3;
-
-    car.h += car.steer * STEER_RATE * dt * Math.min(1, car.speed / 80);
-    const fx = Math.cos(car.h), fy = Math.sin(car.h);
-    let vf = car.vx * fx + car.vy * fy;
-    let lx = car.vx - fx * vf, ly = car.vy - fy * vf;
-    vf += (car.throttle >= 0 ? car.throttle * ACCEL : car.throttle * BRAKE) * dt;
-    vf -= vf * DRAG * dt;
-    vf = clamp(vf, 0, MAX_SPEED);
-    const keep = Math.exp(-P.grip * 12 * dt);           // low grip → the car slides
-    lx *= keep; ly *= keep;
-    car.vx = fx * vf + lx; car.vy = fy * vf + ly;
-    car.speed = vf;
-    car.x += car.vx * dt; car.y += car.vy * dt;
     car.t += dt;
 
     // --- Where am I on the road?
@@ -586,9 +785,7 @@ class Simulation {
       const o = near[k];
       const dx = o.x - car.x, dy = o.y - car.y;
       if (dx * dx + dy * dy > (o.r + 40) * (o.r + 40)) continue;
-      const lxo = dx * c + dy * s, lyo = -dx * s + dy * c;
-      const px = clamp(lxo, -CAR_L / 2, CAR_L / 2), py = clamp(lyo, -CAR_W / 2, CAR_W / 2);
-      const dist = Math.hypot(lxo - px, lyo - py);
+      const dist = carGap(car.x, car.y, c, s, o.x, o.y, o.r) + o.r;
       if (dist < o.r) {
         const [key, what] = OBSTACLE_CAUSE[o.type];
         return this.kill(car, 'crashed', what, key);
@@ -609,13 +806,6 @@ class Simulation {
     let clr = Infinity;
     for (let r = 0; r < NUM_RAYS; r++) if (car.rayLen[r] < clr) clr = car.rayLen[r];
     car.clearance = clr;
-    if (car.steps % TRACE_EVERY === 0) {             // snapshot for lessons
-      const o = (car.recentN % RECENT_LEN) * RECENT_W;
-      car.recent.set(car.inputs, o);
-      car.recent[o + NUM_INPUTS] = car.outSteer;
-      car.recent[o + NUM_INPUTS + 1] = car.throttle;
-      car.recentN++;
-    }
     if (car.steps++ % TRACE_EVERY === 0) {
       const o = (car.traceN % TRACE_LEN) * TRACE_CH;
       car.trace[o] = car.speed; car.trace[o + 1] = car.steer; car.trace[o + 2] = car.throttle; car.trace[o + 3] = clr;

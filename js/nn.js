@@ -67,11 +67,15 @@ class NeuralNet {
       for (let j = 0; j < outN; j++) {
         const d = delta[j], o = base + j * (inp + 1);
         if (d === 0) continue;
+        const ld = lr * d;
         for (let i = 0; i < inp; i++) {
-          if (back) back[i] += w[o + i] * d;
-          w[o + i] = clamp(w[o + i] - lr * d * prev[i], -5, 5);
+          const wi = w[o + i];
+          if (back) back[i] += wi * d;
+          const v = wi - ld * prev[i];
+          w[o + i] = v > 5 ? 5 : v < -5 ? -5 : v;               // inline clamp: this loop is hot
         }
-        w[o + inp] = clamp(w[o + inp] - lr * d, -5, 5);
+        const vb = w[o + inp] - ld;
+        w[o + inp] = vb > 5 ? 5 : vb < -5 ? -5 : vb;
       }
       if (back) for (let i = 0; i < inp; i++) back[i] *= 1 - prev[i] * prev[i];
       delta = back;

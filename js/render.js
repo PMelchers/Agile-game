@@ -424,7 +424,12 @@ class SafetyChart {
 // ---------------------------------------------------------------------------
 // Live view of the leader's neural network.
 // ---------------------------------------------------------------------------
-const INPUT_LABELS = ['←90°', '←55°', '←30°', '←12°', 'ahead', '12°→', '30°→', '55°→', '90°→', 'speed', 'lane pos', 'heading', 'bend'];
+function inputLabels() {
+  return RAY_ANGLES.map(a => {
+    const d = Math.round(a * 180 / Math.PI);
+    return d === 0 ? 'ahead' : d < 0 ? `←${-d}°` : `${d}°→`;
+  }).concat(['speed', 'lane pos', 'heading', 'bend']);
+}
 function drawBrain(canvas, net) {
   const ctx = canvas.getContext('2d');
   const r = canvas.getBoundingClientRect();
@@ -458,13 +463,18 @@ function drawBrain(canvas, net) {
     }
   }
   ctx.font = '9px ui-sans-serif, system-ui, sans-serif';
+  const labels = inputLabels();
+  const gap = sizes[0] > 1 ? pos[0][1].y - pos[0][0].y : 20;
+  const every = Math.max(1, Math.ceil(10 / gap));            // thin out labels when there are many sensors
   for (let l = 0; l < L; l++) {
     for (let j = 0; j < sizes[l]; j++) {
       const v = net.acts[l][j], p = pos[l][j];
       ctx.fillStyle = v >= 0 ? `rgba(80,200,255,${0.25 + 0.75 * Math.abs(v)})` : `rgba(255,120,90,${0.25 + 0.75 * Math.abs(v)})`;
-      ctx.beginPath(); ctx.arc(p.x, p.y, l === 0 || l === L - 1 ? 4.5 : 3.5, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y, l === L - 1 ? 4.5 : l === 0 ? Math.min(4.5, gap * 0.42) : 3.5, 0, TAU); ctx.fill();
       ctx.fillStyle = '#9aa3b2';
-      if (l === 0) { ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(INPUT_LABELS[j] || '', p.x - 8, p.y); }
+      if (l === 0 && (j >= sizes[0] - 4 || j % every === 0 || j === (sizes[0] - 5) / 2)) {
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(labels[j] || '', p.x - 8, p.y);
+      }
       if (l === L - 1) {
         ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
         const label = j === 0 ? (v < -0.1 ? 'steer ←' : v > 0.1 ? 'steer →' : 'steer') : (v >= 0 ? 'gas' : 'brake');

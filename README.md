@@ -18,22 +18,30 @@ Progress (level, history, and the best brain so far) is saved to
 Two kinds of learning work together.
 
 **1. Every car learns from every mistake, straight away.**
-Each car keeps a short memory of the last second of what its sensors saw and
-what it did. When any car crashes, stalls or has a close call, that second
-becomes a *lesson*: in that situation, brake earlier and steer towards open
-space (after a stall: keep driving). Within a fifth of a second, every car
-still driving trains its own brain on the new lesson with backpropagation,
-plus a few older lessons so it doesn't forget. Lessons are kept (up to 900
-situations), and each new generation studies them before it sets off. Watch
-for the blue ripple where a mistake happened and the flash of every car
-learning from it. You can switch this off, or change the lesson strength, on
-the Train tab.
+Each car keeps a snapshot of the last 1.2 seconds: what its sensors saw,
+what it chose, and exactly where it was. When any car crashes, stalls or has
+a close call, the game rewinds to 0.9, 0.5 and 0.2 seconds before the mistake
+and *replays* each moment with 15 different steering and gas/brake choices,
+on the same road with the same pedestrians and traffic, using the same
+physics. Whichever choice gets through safely while still making progress
+becomes the lesson. (If no choice survives, a rule of thumb is used instead:
+brake earlier and steer towards open space; after a stall, keep driving.)
+
+Within a fifth of a second, every car still driving trains its own brain on
+the new lessons with backpropagation, plus a few older lessons so it doesn't
+forget. Up to 1,500 lessons are kept, and each new generation studies them
+before it sets off. Watch for the blue ripple where a mistake happened and
+the flash of every car learning from it. You can switch this off, or change
+the lesson strength, on the Train tab.
 
 **2. Evolution keeps the best brains.**
-- **Sensors:** 9 distance rays (−90° to +90°), plus speed, lane position,
-  heading relative to the road, and how sharply the road bends ahead.
-- **Brain:** a feed-forward network `13 → 16 → 12 → 2` (tanh). The two
-  outputs are steering and gas/brake.
+- **Sensors:** 15 distance lines by default (adjustable from 5 to 31 on the
+  Train tab), fanned from −90° to +90° and packed more densely towards the
+  front, plus speed, lane position, heading relative to the road, and how
+  sharply the road bends ahead. Changing the number adapts every brain: each
+  new line takes over the connections of the nearest old one.
+- **Brain:** a feed-forward network `(sensors + 4) → 16 → 12 → 2` (tanh).
+  The two outputs are steering and gas/brake.
 - After each generation:
   - The top 5% of cars carry over unchanged, and the all-time safest brain
     ("champion") is always kept.
@@ -111,7 +119,7 @@ The same tab has quick controls for how many random hazards appear.
 - **Monitor tab:** click any car on the road (or a leaderboard row) to watch
   it. You get its speed, lap progress, live safety score, close calls, jerky
   steering and nearest-object distance, plus bars for steering and gas/brake.
-  There's a radar of what its 9 sensors see, the last 30 seconds of speed,
+  There's a radar of what its sensors see, the last 30 seconds of speed,
   steering, gas/brake and clearance (hover to scrub), a timeline of events
   (close calls, hard braking, jerky steering, crash or finish), and its brain
   firing live.

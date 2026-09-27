@@ -78,7 +78,7 @@
         <label class="row check"><input type="checkbox" id="learnOn" checked> Every car learns the moment any car makes a mistake</label>
         <label class="slider">Lesson strength <b id="lrVal"></b><input type="range" id="lr" min="0.005" max="0.12" step="0.005"></label>
         <div class="gauges" id="learnStats"></div>
-        <p class="hint">When a car crashes, stalls or has a close call, the last second of what it saw and did becomes a lesson: in that situation, brake earlier and steer towards open space (or, after a stall, keep driving). Every car still driving trains its brain on that lesson straight away, and each new generation studies the saved lessons before it sets off. Evolution then keeps the brains that drive best.</p>
+        <p class="hint">When a car crashes, stalls or has a close call, the game rewinds to 0.9, 0.5 and 0.2 seconds before it and replays each moment with 15 different steering and braking choices, on the same road with the same pedestrians and traffic. Whichever choice gets through safely and keeps making progress becomes the lesson. Every car still driving trains its brain on it straight away, and each new generation studies the saved lessons before it sets off. Evolution then keeps the brains that drive best.</p>
         <div class="btn-row"><button id="btnForgetLessons" class="btn">Forget saved lessons</button></div>
       </section>
 
@@ -101,6 +101,8 @@
 
       <section class="card">
         <h2>Training</h2>
+        <label class="slider">Sensor lines per car <b id="sensVal"></b><input type="range" id="sens" min="5" max="31" step="2"></label>
+        <p class="hint">More lines help cars spot small obstacles and gaps but make the simulation a little slower. Changing this adapts every brain, so the cars keep what they learned, and restarts the current generation.</p>
         <label class="slider">Population <b id="popVal"></b><input type="range" id="pop" min="20" max="400" step="10"></label>
         <label class="slider">Mutation rate <b id="mrVal"></b><input type="range" id="mr" min="0.01" max="0.4" step="0.01"></label>
         <label class="slider">Mutation strength <b id="msVal"></b><input type="range" id="ms" min="0.05" max="1.2" step="0.05"></label>
@@ -152,7 +154,7 @@
       <section class="card">
         <h2>Brain (live)</h2>
         <canvas id="brain"></canvas>
-        <p class="hint">Inputs on the left: 9 distance sensors plus speed, lane position, heading and upcoming bend. Blue is positive, orange is negative.</p>
+        <p class="hint">Inputs on the left: the distance sensors plus speed, lane position, heading and upcoming bend. Blue is positive, orange is negative.</p>
       </section>
       </div>
 

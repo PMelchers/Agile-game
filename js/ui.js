@@ -40,7 +40,7 @@ function save() {
       level: sim.level, bonus: sim.bonus, generation: sim.generation, trackSeed: sim.trackSeed,
       history: sim.history.slice(-400), log: sim.log.slice(0, 40),
       bestSafetyOnLevel: sim.bestSafetyOnLevel,
-      custom: sim.custom, tab, speed, showMap,
+      custom: sim.custom, tab, speed, showMap, sensors: NUM_RAYS,
       settings: {
         popSize: sim.popSize, mutRate: sim.mutRate, mutStrength: sim.mutStrength,
         autoAdvance: sim.autoAdvance, advanceThreshold: sim.advanceThreshold, newTrackEachGen: sim.newTrackEachGen,
@@ -69,11 +69,11 @@ function load() {
     if (data.tab) tab = data.tab;
     if (data.speed === 'max' || Number.isFinite(data.speed)) speed = data.speed;
     if (typeof data.showMap === 'boolean') showMap = data.showMap;
+    if (data.sensors) setSensorCount(data.sensors);
     sim.buildWorld();
     sim.bestSafetyOnLevel = data.bestSafetyOnLevel || 0;
     if (data.champion) {
-      const brain = NeuralNet.fromJSON(data.champion.brain);
-      if (brain.sizes.join() !== NET_SHAPE.join()) throw new Error('shape');
+      const brain = adaptBrain(NeuralNet.fromJSON(data.champion.brain), data.sensors);
       sim.champion = { brain, safety: data.champion.safety, level: data.champion.level, gen: data.champion.gen };
       sim.seedFrom(brain);
     } else {
@@ -535,7 +535,7 @@ document.addEventListener('keydown', e => {
 // file download where the browser allows one.
 $('btnExport').addEventListener('click', () => {
   const brain = sim.champion ? sim.champion.brain : sim.leader().brain;
-  const json = JSON.stringify({ app: 'autopilot-academy', level: sim.level, safety: sim.champion ? sim.champion.safety : null, brain: brain.toJSON() });
+  const json = JSON.stringify({ app: 'autopilot-academy', level: sim.level, sensors: NUM_RAYS, safety: sim.champion ? sim.champion.safety : null, brain: brain.toJSON() });
   const done = ok => toast(ok ? 'Brain copied. Paste it anywhere on this page to import it later.' : 'Brain saved as a file.');
   try {
     navigator.clipboard.writeText(json).then(() => done(true), () => done(false));
@@ -552,8 +552,7 @@ $('btnExport').addEventListener('click', () => {
 function importBrain(text) {
   try {
     const obj = JSON.parse(text);
-    const brain = NeuralNet.fromJSON(obj.brain || obj);
-    if (brain.sizes.join() !== NET_SHAPE.join()) throw new Error('This brain has a different network shape.');
+    const brain = adaptBrain(NeuralNet.fromJSON(obj.brain || obj), obj.sensors);
     sim.champion = { brain, safety: obj.safety || 0, level: sim.level, gen: sim.generation };
     sim.seedFrom(brain);
     sim.emit('Imported a brain and bred a new fleet from it');
@@ -621,6 +620,17 @@ bindSlider('pop', 'popSize', v => v);
 bindSlider('mr', 'mutRate', v => (+v).toFixed(2));
 bindSlider('ms', 'mutStrength', v => (+v).toFixed(2));
 bindSlider('lr', 'learnRate', v => (+v).toFixed(3));
+$('sens').value = NUM_RAYS;
+$('sensVal').textContent = NUM_RAYS;
+$('sens').addEventListener('input', e => { $('sensVal').textContent = e.target.value; });
+$('sens').addEventListener('change', e => {
+  if (sim.setSensors(+e.target.value)) {
+    picked = null;
+    refreshPanel(true);
+    save();
+    toast(`Every car now has ${NUM_RAYS} sensor lines. Their brains were adapted, so they keep what they learned.`);
+  }
+});
 $('learnOn').checked = sim.learnOn;
 setSpeed(speed);
 if (!restored && document.querySelector('.stage').getBoundingClientRect().width < 600) showMap = false;
