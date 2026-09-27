@@ -72,7 +72,8 @@ function describeFactor(key, p) {
 // faces exactly the same situation — a fair exam for every brain.
 // ---------------------------------------------------------------------------
 const START_IDX = 2;
-const START_CLEAR = 45;   // samples after the start line kept free of obstacles
+const START_CLEAR = 70;   // samples after the start line kept free of obstacles, so the pack can spread out
+const HAZARD_GAP = 17;    // min samples between hazards (170px ≈ 0.6s at full speed)
 
 function buildObstacles(track, p, seed) {
   const rand = mulberry32((seed * 31337 + 17) >>> 0);
@@ -90,18 +91,19 @@ function buildObstacles(track, p, seed) {
 
   const coneTarget = Math.round(p.coneDensity * track.length / 1000);
   for (let k = 0; k < coneTarget; k++) {
-    const i = pick(11);
+    const i = pick(HAZARD_GAP);
     if (i < 0) break;
-    const r = 6 + rand() * 6;
+    // Every cone leaves a lane wide enough to pass cleanly, outside the close-call zone.
+    const needGap = CAR_W + 2 * (CLOSE_CALL + 4);
+    const r = Math.min(6 + rand() * 6, Math.max(4, (2 * hw - needGap - 1) / 2));
     let off = (rand() * 2 - 1) * (hw - r - 2);
-    const needGap = 28;
     if (hw - (off + r) < needGap && (off - r) + hw < needGap) off = rand() < 0.5 ? hw - r - 1 : -(hw - r - 1);
     obs.push({ type: 'cone', i, r, x: track.x[i] + track.nx[i] * off, y: track.y[i] + track.ny[i] * off, off });
   }
 
   const pedTarget = Math.round(p.pedDensity * track.length / 1000);
   for (let k = 0; k < pedTarget; k++) {
-    const i = pick(10);
+    const i = pick(HAZARD_GAP);
     if (i < 0) break;
     obs.push({ type: 'ped', i, r: 5, x: 0, y: 0, phase0: rand() * TAU, amp: hw + 14, speed: p.pedSpeed * (0.7 + rand() * 0.6) });
   }
@@ -429,6 +431,8 @@ class Simulation {
     this.bestFitnessOnTrack = 0;
     this.sinceImprove = 0;
     this.boost = 1;
+    this.bestSafetyOnTrack = 0;
+    this.stuckGens = 0;
   }
 
   newTrack(seed) {
@@ -900,6 +904,11 @@ class Simulation {
       this.boost = Math.min(2, this.boost * 1.25);
     }
 
+    // Stuck detection uses the safety record on this track: small ups and downs
+    // of the best car's score no longer count as progress.
+    if (bestSafety > this.bestSafetyOnTrack + 2) { this.bestSafetyOnTrack = bestSafety; this.stuckGens = 0; }
+    else this.stuckGens++;
+
     this.lastGen = { best: bestSafety, avg: avgSafety, finished: this.finishedCount, crashes };
     this.evolve(cars);
     this.generation++;
@@ -916,9 +925,9 @@ class Simulation {
     } else if (this.newTrackEachGen) {
       this.trackSeed = Math.floor(Math.random() * 1e9);
       this.buildWorld();
-    } else if (this.autoAdvance && this.sinceImprove >= 30) {
-      // Hopelessly stuck on one nasty layout: try a fresh track at the same level.
-      this.emit(`No progress for 30 generations: new track at level ${this.level}`);
+    } else if (this.autoAdvance && this.stuckGens >= 25) {
+      // Stuck on one nasty layout: try a fresh track at the same level.
+      this.emit(`No new safety record for 25 generations: new track at level ${this.level}`);
       this.trackSeed = Math.floor(Math.random() * 1e9);
       this.buildWorld();
     }

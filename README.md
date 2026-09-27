@@ -49,6 +49,9 @@ the lesson strength, on the Train tab.
     neuron-level crossover.
   - Half the children get small tweaks and half get bold mutations. If
     progress stalls, the bold half's mutation is boosted automatically.
+  - With auto level-up on, if the best car hasn't set a new safety record
+    on a track for 25 generations, the fleet gets a fresh track at the same
+    level.
 
 Brains keep what they learned from mistakes when they're passed on, so
 lessons build up over generations. In side-by-side tests on the same tracks,
@@ -88,7 +91,9 @@ its own with the `+`/`−` buttons. You can stack them in any combination.
 | Slippery roads | less grip, so the car slides |
 | Time pressure | a higher minimum average speed |
 
-Hazards unlock one after another as the level rises. The track gets longer
+Hazards unlock one after another as the level rises. Hazards are laid out
+fairly: none within 700px of the start line, at least 170px between hazards,
+and every cone leaves a lane wide enough to pass without a close call. The track gets longer
 every level, and each hazard's intensity keeps rising toward a limit it never
 quite reaches. That means every level is harder than the one before, but none
 is impossible.
