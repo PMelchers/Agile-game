@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoPilot Academy</title>
+  <meta name="description" content="Train self-driving AI cars in a 2D world. They learn from their crashes through neuroevolution and earn higher safety scores, with endless difficulty levels.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="stage" aria-label="Simulation">
+      <canvas id="world"></canvas>
+      <div class="hud" id="hud" aria-live="polite"></div>
+      <div class="toast" id="toast" hidden></div>
+      <div class="build-banner" id="buildBanner" hidden></div>
+      <div class="minimap" id="minimap">
+        <canvas id="minimapCanvas" aria-label="Map of the whole track showing every car and where each one failed"></canvas>
+        <div class="tooltip map-tip" id="mapTip" hidden></div>
+        <div class="map-legend" id="mapLegend"></div>
+      </div>
+      <div class="stage-controls">
+        <button id="btnPause" class="btn" title="Pause / play (Space)">Pause</button>
+        <div class="seg" id="speedSeg" role="group" aria-label="Simulation speed">
+          <button data-speed="1">1×</button>
+          <button data-speed="3">3×</button>
+          <button data-speed="10">10×</button>
+          <button data-speed="30">30×</button>
+          <button data-speed="max">Max</button>
+        </div>
+        <div class="speed-ctl" title="Set any speed (+ / − keys)">
+          <label for="speedRange">Speed</label>
+          <input type="range" id="speedRange" min="0" max="1000" step="1" aria-label="Simulation speed">
+          <input type="number" id="speedNum" min="0.1" max="200" step="0.1" aria-label="Speed multiplier">
+          <span>×</span>
+          <output id="speedReal" hidden></output>
+        </div>
+        <button id="btnCam" class="btn" title="Toggle camera (C)">Overview</button>
+        <button id="btnSensors" class="btn" aria-pressed="true" title="Toggle sensor rays (S)">Sensors</button>
+        <button id="btnBuild" class="btn" aria-pressed="false" title="Place obstacles on the road (B)">Place obstacles</button>
+        <button id="btnMap" class="btn" aria-pressed="true" title="Show or hide the map (M)">Map</button>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <header class="brand">
+        <h1>AutoPilot Academy</h1>
+        <p>Every car is driven by a tiny neural network. The ones that drive furthest and safest become the parents of the next generation, so the fleet learns from every crash.</p>
+      </header>
+
+      <div class="stats" id="stats"></div>
+
+      <nav class="tabs" role="tablist" aria-label="Panels">
+        <button role="tab" id="tab-train" aria-controls="panel-train" data-tab="train">Train</button>
+        <button role="tab" id="tab-monitor" aria-controls="panel-monitor" data-tab="monitor">Monitor</button>
+        <button role="tab" id="tab-fleet" aria-controls="panel-fleet" data-tab="fleet">Fleet</button>
+        <button role="tab" id="tab-build" aria-controls="panel-build" data-tab="build">Obstacles</button>
+      </nav>
+
+      <div class="tab-panel" role="tabpanel" id="panel-train" aria-labelledby="tab-train">
+      <section class="card">
+        <div class="card-head">
+          <h2>Safety score by generation</h2>
+          <div class="legend"><span><i class="sw s1"></i>Best car</span><span><i class="sw s2"></i>Fleet avg</span><span><i class="sw dash"></i>Pass mark</span></div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart"></canvas>
+          <div class="tooltip" id="chartTip" hidden></div>
+        </div>
+        <ol class="log" id="log"></ol>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Learning from mistakes</h2>
+          <span class="chip" id="learnChip"></span>
+        </div>
+        <label class="row check"><input type="checkbox" id="learnOn" checked> Every car learns the moment any car makes a mistake</label>
+        <label class="slider">Lesson strength <b id="lrVal"></b><input type="range" id="lr" min="0.005" max="0.12" step="0.005"></label>
+        <div class="gauges" id="learnStats"></div>
+        <p class="hint">When a car crashes, stalls or has a close call, the game rewinds to 0.9, 0.5 and 0.2 seconds before it and replays each moment with 15 different steering and braking choices, on the same road with the same pedestrians and traffic. Whichever choice gets through safely and keeps making progress becomes the lesson. Every car still driving trains its brain on it straight away, and each new generation studies the saved lessons before it sets off. Evolution then keeps the brains that drive best.</p>
+        <div class="btn-row"><button id="btnForgetLessons" class="btn">Forget saved lessons</button></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Difficulty</h2>
+          <div class="stepper big">
+            <button id="lvlDown" aria-label="Lower level">−</button>
+            <span>Level <b id="lvl">1</b></span>
+            <button id="lvlUp" aria-label="Raise level">+</button>
+          </div>
+        </div>
+        <label class="row check"><input type="checkbox" id="autoAdv" checked> Level up automatically when the best car finishes with safety ≥ <b id="thrVal">75</b></label>
+        <input type="range" id="thr" min="40" max="99" value="75" aria-label="Pass mark">
+        <label class="row check"><input type="checkbox" id="newEach"> New random track every generation (harder, but they generalise better)</label>
+        <p class="hint">There is no top level. Every hazard below keeps getting harder, and you can stack extra on any one of them.</p>
+        <div class="factors" id="factors"></div>
+        <button id="btnNewTrack" class="btn wide">New track (N)</button>
+      </section>
+
+      <section class="card">
+        <h2>Training</h2>
+        <label class="slider">Sensor lines per car <b id="sensVal"></b><input type="range" id="sens" min="5" max="31" step="2"></label>
+        <p class="hint">More lines help cars spot small obstacles and gaps but make the simulation a little slower. Changing this adapts every brain, so the cars keep what they learned, and restarts the current generation.</p>
+        <label class="slider">Population <b id="popVal"></b><input type="range" id="pop" min="20" max="400" step="10"></label>
+        <label class="slider">Mutation rate <b id="mrVal"></b><input type="range" id="mr" min="0.01" max="0.4" step="0.01"></label>
+        <label class="slider">Mutation strength <b id="msVal"></b><input type="range" id="ms" min="0.05" max="1.2" step="0.05"></label>
+        <p class="hint" id="boostHint"></p>
+        <div class="btn-row">
+          <button id="btnExport" class="btn">Export brain</button>
+          <label class="btn file">Import brain file<input type="file" id="fileImport" accept="application/json,.json" hidden></label>
+        </div>
+        <p class="hint">Export copies the best brain to your clipboard. Paste it anywhere on this page, or import a saved file, to breed a new fleet from it.</p>
+        <div class="btn-row">
+          <button id="btnResetBrains" class="btn danger">Forget everything</button>
+        </div>
+      </section>
+
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-monitor" aria-labelledby="tab-monitor" hidden>
+      <section class="card">
+        <div class="card-head">
+          <h2 id="monTitle">Car</h2>
+          <span class="chip" id="monStatus"></span>
+        </div>
+        <p class="hint" id="monHint">Click any car on the road to watch it. Until then this follows the leader.</p>
+        <div class="gauges" id="monGauges"></div>
+        <div class="bars">
+          <div class="bar-row"><span>Steering</span><div class="cbar" id="barSteer"><i></i></div><b id="valSteer"></b></div>
+          <div class="bar-row"><span>Gas / brake</span><div class="cbar" id="barGas"><i></i></div><b id="valGas"></b></div>
+        </div>
+        <div class="mon-grid">
+          <div>
+            <h3>What the sensors see</h3>
+            <canvas id="radar"></canvas>
+          </div>
+          <div>
+            <h3>Last 30 seconds</h3>
+            <canvas id="telemetry"></canvas>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btnFollowLeader" class="btn" hidden>Watch the leader again</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>What happened on this run</h2>
+        <ol class="events" id="monEvents"></ol>
+      </section>
+
+      <section class="card">
+        <h2>Brain (live)</h2>
+        <canvas id="brain"></canvas>
+        <p class="hint">Inputs on the left: the distance sensors plus speed, lane position, heading and upcoming bend. Blue is positive, orange is negative.</p>
+      </section>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-fleet" aria-labelledby="tab-fleet" hidden>
+      <section class="card">
+        <h2>This generation so far</h2>
+        <div class="obar" id="liveBar"></div>
+        <div class="olegend" id="liveLegend"></div>
+      </section>
+
+      <section class="card">
+        <h2>How each generation ended</h2>
+        <div class="chart-wrap">
+          <canvas id="outcomes"></canvas>
+          <div class="tooltip" id="outcomeTip" hidden></div>
+        </div>
+        <div class="olegend" id="outcomeLegend"></div>
+        <p class="hint">As the fleet learns, the crash colours shrink and the finished share grows.</p>
+      </section>
+
+      <section class="card">
+        <h2>Leaderboard (live)</h2>
+        <div class="table-wrap">
+          <table class="board">
+            <thead><tr><th>#</th><th>Car</th><th>Status</th><th>Lap</th><th>Speed</th><th>Close calls</th><th>Safety</th></tr></thead>
+            <tbody id="board"></tbody>
+          </table>
+        </div>
+        <p class="hint">Click a row to watch that car in the Monitor tab.</p>
+      </section>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-build" aria-labelledby="tab-build" hidden>
+      <section class="card">
+        <h2>Place obstacles</h2>
+        <p class="hint">Pick one, then click the road. Cars react straight away. Your obstacles stay on this track for every generation until the track changes.</p>
+        <div class="tools" id="tools" role="radiogroup" aria-label="Obstacle to place"></div>
+        <label class="slider">Cone and rock size <b id="objSizeVal"></b><input type="range" id="objSize" min="5" max="22" step="1" value="10"></label>
+        <p class="hint" id="buildCount"></p>
+        <div class="btn-row">
+          <button id="btnClearMine" class="btn">Remove my obstacles</button>
+          <button id="btnClearAll" class="btn danger">Clear the whole road</button>
+        </div>
+        <p class="hint">Clearing the whole road also removes the random hazards until the track or the difficulty changes.</p>
+      </section>
+      <section class="card">
+        <h2>Random hazards</h2>
+        <p class="hint">How many random cones, pedestrians and cars appear is set by the difficulty.</p>
+        <div class="factors" id="buildFactors"></div>
+      </section>
+      </div>
+
+      <footer class="keys">Space pause · 1–5 speed presets · + − faster / slower · C camera · S sensors · M map · B place obstacles · Esc stop placing · N new track · scroll to zoom · click a car to watch it</footer>
+    </aside>
+  </main>
+
+  <script src="js/util.js"></script>
+  <script src="js/nn.js"></script>
+  <script src="js/track.js"></script>
+  <script src="js/sim.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/monitor.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
