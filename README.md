@@ -102,6 +102,16 @@ The same tab has quick controls for how many random hazards appear.
   of how every recent generation ended (finished, or which kind of crash), and
   a live leaderboard.
 
+## Map of failures
+
+The map in the top-right corner shows the whole track, every car still
+driving, and a coloured ✕ wherever a car failed: hitting the barrier, an
+obstacle, a pedestrian or another car, or stalling. Marks from this
+generation are bright and the previous generation's are faded, so you can see
+danger spots and watch them move as the fleet learns. Hover a ✕ to see which
+car failed, how, how far round the lap it got and when. Click it (or any
+driving car) to open that car in the Monitor tab. Press **M** to hide the map.
+
 ## Controls
 
 | Key | Action |
@@ -113,6 +123,7 @@ The same tab has quick controls for how many random hazards appear.
 | S | show or hide sensor rays |
 | N | new random track |
 | B | place obstacles (Esc stops) |
+| M | show or hide the map |
 | Click a car | watch it in the Monitor tab |
 | Mouse wheel | zoom |
 

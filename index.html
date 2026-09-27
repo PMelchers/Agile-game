@@ -14,6 +14,11 @@
       <div class="hud" id="hud" aria-live="polite"></div>
       <div class="toast" id="toast" hidden></div>
       <div class="build-banner" id="buildBanner" hidden></div>
+      <div class="minimap" id="minimap">
+        <canvas id="minimapCanvas" aria-label="Map of the whole track showing every car and where each one failed"></canvas>
+        <div class="tooltip map-tip" id="mapTip" hidden></div>
+        <div class="map-legend" id="mapLegend"></div>
+      </div>
       <div class="stage-controls">
         <button id="btnPause" class="btn" title="Pause / play (Space)">Pause</button>
         <div class="seg" id="speedSeg" role="group" aria-label="Simulation speed">
@@ -33,6 +38,7 @@
         <button id="btnCam" class="btn" title="Toggle camera (C)">Overview</button>
         <button id="btnSensors" class="btn" aria-pressed="true" title="Toggle sensor rays (S)">Sensors</button>
         <button id="btnBuild" class="btn" aria-pressed="false" title="Place obstacles on the road (B)">Place obstacles</button>
+        <button id="btnMap" class="btn" aria-pressed="true" title="Show or hide the map (M)">Map</button>
       </div>
     </section>
 
@@ -187,7 +193,7 @@
       </section>
       </div>
 
-      <footer class="keys">Space pause · 1–5 speed presets · + − faster / slower · C camera · S sensors · B place obstacles · Esc stop placing · N new track · scroll to zoom · click a car to watch it</footer>
+      <footer class="keys">Space pause · 1–5 speed presets · + − faster / slower · C camera · S sensors · M map · B place obstacles · Esc stop placing · N new track · scroll to zoom · click a car to watch it</footer>
     </aside>
   </main>
 

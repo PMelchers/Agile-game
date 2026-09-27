@@ -61,7 +61,8 @@ class Renderer {
       tx = (b.minX + b.maxX) / 2; ty = (b.minY + b.maxY) / 2;
       tz = Math.min(this.w / (b.maxX - b.minX + 80), this.h / (b.maxY - b.minY + 80));
     } else {
-      tx = focus ? focus.x : 0; ty = focus ? focus.y : 0;
+      const f = focus && this.ip(focus);
+      tx = f ? f.x : 0; ty = f ? f.y : 0;
       tz = clamp(Math.min(this.w, this.h) / 520, 0.6, 2.2);
     }
     tz *= this.userZoom;
@@ -74,7 +75,21 @@ class Renderer {
 
   // focus: the car being watched (picked by the viewer, or the leader).
   // ghost: preview of an obstacle about to be placed, or null.
-  draw(sim, dt, focus, picked, ghost) {
+  // Position of a car or obstacle blended between its last two physics steps,
+  // so motion stays smooth whatever the simulation speed or screen refresh rate.
+  ip(o) {
+    const a = this.alpha;
+    if (o.px === undefined || a >= 1) return { x: o.x, y: o.y, h: o.h };
+    return {
+      x: o.px + (o.x - o.px) * a,
+      y: o.py + (o.y - o.py) * a,
+      h: o.ph === undefined || o.h === undefined ? o.h : o.ph + wrapAngle(o.h - o.ph) * a,
+    };
+  }
+
+  // alpha: 0–1, how far the clock is between the last physics step and the next.
+  draw(sim, dt, focus, picked, ghost, alpha = 1) {
+    this.alpha = alpha;
     if (this.track !== sim.track) { this.setTrack(sim.track, sim.params); this.snap = true; }
     this.updateCamera(sim, dt, focus);
     const ctx = this.ctx, tr = sim.track, P = sim.params, z = this.cam.zoom;
@@ -134,7 +149,8 @@ class Renderer {
     // Obstacles
     for (const o of sim.obstacles) {
       if (!inView(o.x, o.y)) continue;
-      this.drawObstacle(o);
+      const q = o.px === undefined ? o : Object.assign({}, o, this.ip(o));
+      this.drawObstacle(q);
       if (o.custom) {          // hand-placed: dashed ring so it stands out
         ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
         ctx.beginPath(); ctx.arc(o.x, o.y, o.r + 4, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
@@ -158,37 +174,42 @@ class Renderer {
     // Cars: the crowd first, then the watched car on top with its sensors
     for (const c of sim.cars) {
       if (!c.alive || c === focus || !inView(c.x, c.y)) continue;
+      // Cars that stop making progress fade out, so dawdlers don't clutter the view.
+      ctx.globalAlpha = clamp(1 - (c.t - c.lastGain - 0.8) / 2.5, 0.2, 1);
       this.drawCar(c, 'rgba(120,190,255,0.45)', null);
     }
+    ctx.globalAlpha = 1;
     for (const c of sim.cars) {
       if (c.status !== 'finished' || c === focus || !inView(c.x, c.y)) continue;
       this.drawCar(c, 'rgba(90,230,150,0.5)', null);
     }
     if (focus) {
+      const fp = this.ip(focus);
       if (this.showSensors && focus.alive) {
         for (let r = 0; r < NUM_RAYS; r++) {
-          const a = focus.h + RAY_ANGLES[r], d = focus.rayLen[r];
+          const a = fp.h + RAY_ANGLES[r], d = focus.rayLen[r];
           const v = focus.sensors[r];
           ctx.strokeStyle = `rgba(${Math.round(80 + 175 * v)},${Math.round(230 - 170 * v)},120,0.75)`;
           ctx.lineWidth = 1.2 / z * 1.5;
-          ctx.beginPath(); ctx.moveTo(focus.x, focus.y);
-          ctx.lineTo(focus.x + Math.cos(a) * d, focus.y + Math.sin(a) * d); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(fp.x, fp.y);
+          ctx.lineTo(fp.x + Math.cos(a) * d, fp.y + Math.sin(a) * d); ctx.stroke();
           ctx.fillStyle = ctx.strokeStyle;
-          ctx.beginPath(); ctx.arc(focus.x + Math.cos(a) * d, focus.y + Math.sin(a) * d, 2.5, 0, TAU); ctx.fill();
+          ctx.beginPath(); ctx.arc(fp.x + Math.cos(a) * d, fp.y + Math.sin(a) * d, 2.5, 0, TAU); ctx.fill();
         }
       }
       const fill = focus.alive || focus.status === 'finished' ? '#35d0ff' : '#e66767';
       this.drawCar(focus, fill, '#ffffff');
       if (picked) {
         ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5 / z * 1.5; ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.arc(focus.x, focus.y, 20, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(fp.x, fp.y, 20, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
       }
     }
     ctx.restore();
 
     // Fog: a mist that thickens beyond what the leader's sensors can see
     if (P.f.fog > 0 && focus) {
-      const sx = (focus.x - this.cam.x) * z + this.w / 2, sy = (focus.y - this.cam.y) * z + this.h / 2;
+      const fp = this.ip(focus);
+      const sx = (fp.x - this.cam.x) * z + this.w / 2, sy = (fp.y - this.cam.y) * z + this.h / 2;
       const rIn = P.sensorRange * z * 0.6, rOut = P.sensorRange * z * 1.6;
       const g = ctx.createRadialGradient(sx, sy, rIn, sx, sy, rOut);
       const a = Math.min(0.75, 0.12 * P.f.fog);
@@ -229,9 +250,9 @@ class Renderer {
   }
 
   drawCar(c, fill, outline) {
-    const ctx = this.ctx;
+    const ctx = this.ctx, p = this.ip(c);
     ctx.save();
-    ctx.translate(c.x, c.y); ctx.rotate(c.h);
+    ctx.translate(p.x, p.y); ctx.rotate(p.h);
     ctx.fillStyle = fill;
     roundRect(ctx, -CAR_L / 2, -CAR_W / 2, CAR_L, CAR_W, 3); ctx.fill();
     if (outline) { ctx.strokeStyle = outline; ctx.lineWidth = 1.5; ctx.stroke(); }
@@ -240,17 +261,22 @@ class Renderer {
     ctx.restore();
   }
 
+  // Failure marks, coloured by how the car failed (same colours as the Fleet tab).
   drawCrashes(marks, alpha, view) {
     const ctx = this.ctx;
-    ctx.strokeStyle = `rgba(255,70,70,${alpha})`;
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (const m of marks) {
-      if (m.x < view.x0 || m.x > view.x1 || m.y < view.y0 || m.y > view.y1) continue;
-      ctx.moveTo(m.x - 4, m.y - 4); ctx.lineTo(m.x + 4, m.y + 4);
-      ctx.moveTo(m.x + 4, m.y - 4); ctx.lineTo(m.x - 4, m.y + 4);
+    ctx.globalAlpha = alpha;
+    for (const o of OUTCOMES) {
+      ctx.strokeStyle = outcomeColor(o.key);
+      ctx.beginPath();
+      for (const m of marks) {
+        if (m.key !== o.key || m.x < view.x0 || m.x > view.x1 || m.y < view.y0 || m.y > view.y1) continue;
+        ctx.moveTo(m.x - 4, m.y - 4); ctx.lineTo(m.x + 4, m.y + 4);
+        ctx.moveTo(m.x + 4, m.y - 4); ctx.lineTo(m.x - 4, m.y + 4);
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 }
 

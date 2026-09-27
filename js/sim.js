@@ -221,6 +221,7 @@ class Car {
   reset(track) {
     const i = START_IDX;
     this.x = track.x[i]; this.y = track.y[i]; this.h = track.ang[i];
+    this.px = this.x; this.py = this.y; this.ph = this.h;
     this.vx = 0; this.vy = 0; this.speed = 0;
     this.idx = i; this.off = 0; this.lap = 0;
     this.progress = i; this.maxProgress = i; this.lastGain = 0;
@@ -315,6 +316,7 @@ class Simulation {
     this.finishedCount = 0;
     this.aliveCount = this.cars.length;
     updateObstacles(this.track, this.obstacles, 0);
+    for (const o of this.obstacles) { o.px = o.x; o.py = o.y; o.ph = o.h; }
     this.cars.forEach((c, k) => { c.id = k + 1; c.reset(this.track); });
   }
 
@@ -373,10 +375,13 @@ class Simulation {
   }
 
   step(dt) {
+    // Remember where everything was so the renderer can draw smoothly between steps.
+    for (const o of this.obstacles) { o.px = o.x; o.py = o.y; o.ph = o.h; }
     updateObstacles(this.track, this.obstacles, this.time);
     let alive = 0;
     for (const car of this.cars) {
       if (!car.alive) continue;
+      car.px = car.x; car.py = car.y; car.ph = car.h;
       this.updateCar(car, dt);
       if (car.alive) alive++;
     }
@@ -508,6 +513,8 @@ class Simulation {
     // --- Rules of the exam
     if (car.progress < car.maxProgress - 30) return this.kill(car, 'wrong-way', 'drove the wrong way', 'other');
     if (car.t - car.lastGain > 5) return this.kill(car, 'stalled', 'stalled', 'other');
+    // Cars that never really set off only clutter the start line.
+    if (car.t > 2.5 && car.maxProgress - START_IDX < 3) return this.kill(car, 'stalled', 'never got going', 'other');
     if (car.progress >= START_IDX + N * P.laps) {
       car.finishTime = car.t;
       this.finishedCount++;
@@ -520,10 +527,16 @@ class Simulation {
     car.status = status;
     car.cause = cause;
     car.outcome = outcome;
+    car.px = car.x; car.py = car.y; car.ph = car.h;
+    if (status === 'crashed' || status === 'stalled' || status === 'wrong-way') {
+      this.crashMarks.push({
+        x: car.x, y: car.y, key: outcome, cause, car: car.id, gen: this.generation, t: car.t,
+        pct: clamp((car.maxProgress - START_IDX) / (this.track.N * this.params.laps), 0, 1) * 100,
+      });
+    }
     if (status === 'finished') car.logEvent('good', `Finished the lap in ${car.t.toFixed(1)}s`);
     else if (status === 'crashed') car.logEvent('bad', `Crashed: ${cause}`);
-    else car.logEvent('bad', status === 'stalled' ? 'Stalled: no progress for 5s' : status === 'wrong-way' ? 'Turned around and drove the wrong way' : 'Ran out of time');
-    if (status === 'crashed') this.crashMarks.push({ x: car.x, y: car.y, cause });
+    else car.logEvent('bad', status === 'stalled' ? (cause === 'never got going' ? 'Never got going' : 'Stalled: no progress for 5s') : status === 'wrong-way' ? 'Turned around and drove the wrong way' : 'Ran out of time');
     this.scoreCar(car);
   }
 

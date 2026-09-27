@@ -9,6 +9,15 @@ const renderer = new Renderer($('world'));
 const chart = new SafetyChart($('chart'), $('chartTip'));
 const telemetry = new Telemetry($('telemetry'));
 const outcomeChart = new OutcomeChart($('outcomes'), $('outcomeTip'));
+const minimap = new Minimap($('minimapCanvas'), $('mapTip'), hit => {
+  if (hit.car) { pickCar(hit.car); setTab('monitor'); return; }
+  const m = hit.mark;
+  const car = m.gen === sim.generation && sim.cars.find(c => c.id === m.car);
+  if (car) { pickCar(car); setTab('monitor'); }
+  else toast(`Car ${m.car} was in generation ${m.gen}. Its brain has since been bred into the new fleet.`);
+});
+let showMap = true;
+let frameAlpha = 1;
 
 let paused = false;
 let speed = 3;
@@ -31,7 +40,7 @@ function save() {
       level: sim.level, bonus: sim.bonus, generation: sim.generation, trackSeed: sim.trackSeed,
       history: sim.history.slice(-400), log: sim.log.slice(0, 40),
       bestSafetyOnLevel: sim.bestSafetyOnLevel,
-      custom: sim.custom, tab, speed,
+      custom: sim.custom, tab, speed, showMap,
       settings: {
         popSize: sim.popSize, mutRate: sim.mutRate, mutStrength: sim.mutStrength,
         autoAdvance: sim.autoAdvance, advanceThreshold: sim.advanceThreshold, newTrackEachGen: sim.newTrackEachGen,
@@ -58,6 +67,7 @@ function load() {
     sim.customSeed = sim.trackSeed;
     if (data.tab) tab = data.tab;
     if (data.speed === 'max' || Number.isFinite(data.speed)) speed = data.speed;
+    if (typeof data.showMap === 'boolean') showMap = data.showMap;
     sim.buildWorld();
     sim.bestSafetyOnLevel = data.bestSafetyOnLevel || 0;
     if (data.champion) {
@@ -428,6 +438,18 @@ $('objSize').addEventListener('input', e => { objSize = +e.target.value; $('objS
 $('btnClearMine').addEventListener('click', () => { sim.clearCustomObstacles(); refreshPanel(false); save(); toast('Removed your obstacles.'); });
 $('btnClearAll').addEventListener('click', () => { sim.clearAllObstacles(); refreshPanel(false); save(); toast('The road is clear until the track or difficulty changes.'); });
 
+// ------------------------------------------------------------ minimap
+function toggleMap(force) {
+  showMap = typeof force === 'boolean' ? force : !showMap;
+  $('minimap').hidden = !showMap;
+  $('btnMap').setAttribute('aria-pressed', String(showMap));
+  save();
+}
+$('btnMap').addEventListener('click', () => toggleMap());
+$('mapLegend').innerHTML = OUTCOMES.filter(o => o.key !== 'finished').map(o =>
+  `<span><b style="color:var(${o.color})">✕</b>${{ wall: 'Barrier', obstacle: 'Obstacle', ped: 'Pedestrian', car: 'Car', other: 'Stalled' }[o.key]}</span>`).join('') +
+  '<span><b style="color:#78beff">■</b>Driving</span>';
+
 // ------------------------------------------------------------ canvas input
 function canvasPoint(e) {
   const r = $('world').getBoundingClientRect();
@@ -493,6 +515,7 @@ document.addEventListener('keydown', e => {
   else if (k === 's') toggleSensors();
   else if (k === 'n') { sim.newTrack(); refreshPanel(true); }
   else if (k === 'b') $('btnBuild').click();
+  else if (k === 'm') toggleMap();
   else if (k === 'escape') { if (tool) setTool(null); else if (picked) { picked = null; lastEventsKey = ''; } }
   else if ('12345'.includes(k) && k.length === 1) setSpeed([1, 3, 10, 30, 'max'][+k - 1]);
   else if (k === '+' || k === '=') nudgeSpeed(1);
@@ -586,6 +609,8 @@ bindSlider('pop', 'popSize', v => v);
 bindSlider('mr', 'mutRate', v => (+v).toFixed(2));
 bindSlider('ms', 'mutStrength', v => (+v).toFixed(2));
 setSpeed(speed);
+if (!restored && document.querySelector('.stage').getBoundingClientRect().width < 600) showMap = false;
+toggleMap(showMap);
 refreshPanel(true);
 setTab(['train', 'monitor', 'fleet', 'build'].includes(tab) ? tab : 'train');
 if (restored) toast(`Welcome back: resuming level ${sim.level}, generation ${sim.generation}`);
@@ -622,8 +647,13 @@ function frame(now) {
     refreshPanel(true);
     save();
   }
+  if (!paused) frameAlpha = speed === 'max' ? 1 : clamp(stepAcc, 0, 1);
   const focus = focusCar();
-  renderer.draw(sim, dt, focus, !!picked, ghost);
+  renderer.draw(sim, dt, focus, !!picked, ghost, frameAlpha);
+  if (showMap) {
+    const st = document.querySelector('.stage').getBoundingClientRect();
+    minimap.draw(sim, renderer, focus, Math.min(230, st.width * 0.32), Math.min(230, st.height * 0.42));
+  }
   refreshHud();
   if (now - lastMonitor > 100) {
     lastMonitor = now;
