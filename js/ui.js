@@ -31,7 +31,7 @@ function save() {
       level: sim.level, bonus: sim.bonus, generation: sim.generation, trackSeed: sim.trackSeed,
       history: sim.history.slice(-400), log: sim.log.slice(0, 40),
       bestSafetyOnLevel: sim.bestSafetyOnLevel,
-      custom: sim.custom, tab,
+      custom: sim.custom, tab, speed,
       settings: {
         popSize: sim.popSize, mutRate: sim.mutRate, mutStrength: sim.mutStrength,
         autoAdvance: sim.autoAdvance, advanceThreshold: sim.advanceThreshold, newTrackEachGen: sim.newTrackEachGen,
@@ -57,6 +57,7 @@ function load() {
     sim.custom = Array.isArray(data.custom) ? data.custom.filter(c => PLACEABLE[c.kind] && Number.isFinite(c.i) && Number.isFinite(c.off)) : [];
     sim.customSeed = sim.trackSeed;
     if (data.tab) tab = data.tab;
+    if (data.speed === 'max' || Number.isFinite(data.speed)) speed = data.speed;
     sim.buildWorld();
     sim.bestSafetyOnLevel = data.bestSafetyOnLevel || 0;
     if (data.champion) {
@@ -84,9 +85,36 @@ function toast(msg) {
 }
 sim.onEvent = msg => { toast(msg); renderLog(); };
 
+// Speed is a real-time multiplier: 1× = real time, 0.1× = slow motion,
+// 'max' = as many physics steps as the CPU can fit into each frame.
+const SPEED_MIN = 0.1, SPEED_MAX = 200;
+const LOG_MIN = Math.log10(SPEED_MIN), LOG_SPAN = Math.log10(SPEED_MAX) - LOG_MIN;
+const speedToSlider = v => Math.round(((Math.log10(v) - LOG_MIN) / LOG_SPAN) * 1000);
+const sliderToSpeed = x => {
+  const v = Math.pow(10, LOG_MIN + (x / 1000) * LOG_SPAN);
+  return v < 10 ? Math.round(v * 10) / 10 : Math.round(v);     // friendly steps: 0.1, 2.5, 40, 150…
+};
+let stepAcc = 0;
+let stepsThisSecond = 0, secondStart = performance.now(), realSpeed = 0;
+
 function setSpeed(s) {
+  if (s !== 'max') s = clamp(+s || 1, SPEED_MIN, SPEED_MAX);
   speed = s;
+  stepAcc = 0;
+  $('speedReal').hidden = true;                         // re-measured over the next second
+  stepsThisSecond = 0; secondStart = performance.now();
   for (const b of $('speedSeg').querySelectorAll('button')) b.classList.toggle('on', String(s) === b.dataset.speed);
+  $('speedRange').value = s === 'max' ? 1000 : speedToSlider(s);
+  if (document.activeElement !== $('speedNum')) $('speedNum').value = s === 'max' ? '' : s;
+  $('speedNum').placeholder = s === 'max' ? 'max' : '';
+  save();
+}
+$('speedRange').addEventListener('input', e => setSpeed(sliderToSpeed(+e.target.value)));
+$('speedNum').addEventListener('change', e => { if (e.target.value !== '') setSpeed(+e.target.value); });
+$('speedNum').addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
+function nudgeSpeed(dir) {
+  const cur = speed === 'max' ? Math.max(1, realSpeed) : speed;
+  setSpeed(sliderToSpeed(clamp(speedToSlider(cur) + dir * 60, 0, 1000)));
 }
 $('speedSeg').addEventListener('click', e => {
   const b = e.target.closest('button');
@@ -467,6 +495,8 @@ document.addEventListener('keydown', e => {
   else if (k === 'b') $('btnBuild').click();
   else if (k === 'escape') { if (tool) setTool(null); else if (picked) { picked = null; lastEventsKey = ''; } }
   else if ('12345'.includes(k) && k.length === 1) setSpeed([1, 3, 10, 30, 'max'][+k - 1]);
+  else if (k === '+' || k === '=') nudgeSpeed(1);
+  else if (k === '-' || k === '_') nudgeSpeed(-1);
 });
 
 // Export copies the brain to the clipboard (works everywhere) and also offers a
@@ -565,12 +595,27 @@ function frame(now) {
   const dt = Math.min(0.1, (now - prev) / 1000);
   prev = now;
   if (!paused) {
+    const start = performance.now();
+    let steps = 0;
     if (speed === 'max') {
-      const start = performance.now();
-      do { sim.step(DT); } while (performance.now() - start < 14);
+      do { sim.step(DT); steps++; } while (performance.now() - start < 14);
     } else {
-      for (let i = 0; i < speed; i++) sim.step(DT);
+      // Frame-rate independent: advance by real elapsed time × speed.
+      stepAcc += (dt * speed) / DT;
+      while (stepAcc >= 1) {
+        sim.step(DT); steps++; stepAcc--;
+        if (performance.now() - start > 20) { stepAcc = 0; break; }   // CPU can't keep up: don't spiral
+      }
     }
+    stepsThisSecond += steps;
+  }
+  if (now - secondStart >= 1000) {
+    realSpeed = (stepsThisSecond * DT) / ((now - secondStart) / 1000);
+    stepsThisSecond = 0; secondStart = now;
+    const out = $('speedReal');
+    const lagging = !paused && (speed === 'max' || realSpeed < speed * 0.85);
+    out.hidden = !lagging;
+    if (lagging) out.textContent = speed === 'max' ? `≈${realSpeed.toFixed(0)}×` : `running at ${realSpeed.toFixed(realSpeed < 10 ? 1 : 0)}× (CPU limit)`;
   }
   if (sim.generation !== lastGen) {
     lastGen = sim.generation;

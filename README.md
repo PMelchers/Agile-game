@@ -107,7 +107,8 @@ The same tab has quick controls for how many random hazards appear.
 | Key | Action |
 |---|---|
 | Space | pause / play |
-| 1–5 | simulation speed (1×, 3×, 10×, 30×, max) |
+| 1–5 | speed presets (1×, 3×, 10×, 30×, max) |
+| + / − | speed up / slow down (0.1× slow motion to 200×) |
 | C | follow the leader / overview the whole track |
 | S | show or hide sensor rays |
 | N | new random track |
