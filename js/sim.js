@@ -313,19 +313,27 @@ const REPLAY_GAS = [-0.7, 0.15, 0.8];
 // should have ...". x = what the sensors saw, s/t = the steering and
 // gas/brake the car chose, u = how close to the mistake (1 = the last moment).
 function lessonTarget(x, s, t, kind, u) {
-  if (kind === 'stalled') return [s, 0.9];                     // keep driving
   let left = 0, right = 0, front = 0;
   for (let r = 0; r < NUM_RAYS; r++) {                          // sensor value 1 = something touching
     const a = RAY_ANGLES[r];
     if (a < -0.05) left += x[r]; else if (a > 0.05) right += x[r];
     if (Math.abs(a) < 0.3) front = Math.max(front, x[r]);
   }
+  // After a stall, "keep driving" is only right when the way ahead is clear;
+  // if something is in front, stopping may have been the right call.
+  if (kind === 'stalled') return front < 0.5 ? [s, 0.9] : null;
   const away = right > left ? -1 : 1;                           // steer towards the more open side
   const steer = clamp(s + away * (0.45 + 0.55 * front) * u, -1, 1);
   const fast = x[NUM_RAYS] > 0.35;                              // speed input, 1 = top speed
   const gas = fast ? clamp(t - (0.3 + 0.6 * front) * u, -1, 1) : Math.max(t, 0.3);
   return [steer, gas];
 }
+// Waiting for a moving hazard (a pedestrian crossing, a slower car ahead) is
+// good driving, not stalling.
+const WAIT_LOOK = 150;       // px ahead a hazard can be for waiting to count
+const WAIT_SPEED = 45;       // px/s; slower than this near a hazard = waiting
+const WAIT_PATIENCE = 15;    // s of waiting before the stall rule applies again
+const YIELD_BONUS = 20;      // fitness bonus per safe wait (in track samples, ~200px)
 const STATUS_MUL = { finished: 1, driving: 0.85, timeout: 0.85, stalled: 0.7, crashed: 0.5, 'wrong-way': 0.5 };
 
 class Car {
@@ -351,6 +359,7 @@ class Car {
     this.outcome = '';
     this.trace = new Float32Array(TRACE_LEN * TRACE_CH);
     this.traceN = 0; this.steps = 0;
+    this.waitStreak = 0; this.waitTotal = 0; this.waitingFor = null; this.waitIdx = 0; this.yields = 0;
     this.recent = new Float32Array(RECENT_LEN * RECENT_W);
     this.recentN = 0;
     this.lessons = 0; this.lessonsPending = 0; this.lastLearnLog = -9; this.learnedFrom = [];
@@ -458,6 +467,7 @@ class Simulation {
     this.cars.forEach((c, k) => { c.id = k + 1; c.reset(this.track); });
     this.mistakesThisGen = 0;
     this.lessonsThisGen = 0;
+    this.safeWaitsThisGen = 0;
     this.lessonFx = [];
     this._newMistakes = [];
     this._queue = [];
@@ -523,7 +533,7 @@ class Simulation {
     if (!this.learnOn) return;
     const n = Math.min(car.recentN, RECENT_LEN);
     if (!n) return;
-    const backs = kind === 'close' ? [2] : kind === 'stalled' ? [0, 3] : [9, 5, 2];
+    const backs = kind === 'close' ? [2] : kind === 'stalled' ? [0, 3] : kind === 'good' ? [8, 4, 1] : [9, 5, 2];
     const snaps = [];
     for (const k of backs) {
       if (k >= n) continue;
@@ -533,7 +543,7 @@ class Simulation {
     if (!snaps.length) return;
     if (this._queue.length >= 60) this._queue.shift();          // too many at once: drop the oldest
     this._queue.push({ car: car.id, kind, cause, snaps });
-    if (kind !== 'close') {
+    if (kind !== 'good' && kind !== 'close') {
       this.mistakesThisGen++;
       this.lessonFx.push({ x: car.x, y: car.y, t: this.time });
     }
@@ -547,7 +557,9 @@ class Simulation {
       for (const sn of m.snaps) {
         const rec = sn.rec, x = rec.slice(0, NUM_INPUTS), s = rec[NUM_INPUTS], t = rec[NUM_INPUTS + 1];
         let y = null, w;
-        if (m.kind !== 'stalled') {
+        if (m.kind === 'good') {                                 // a safe wait: what it did was right
+          y = [s, t]; w = 0.7;
+        } else {
           const best = this.replay(rec);
           if (best) { y = best; w = (m.kind === 'close' ? 0.5 : 1) * (0.5 + 0.5 * sn.u); this.replayWins++; }
         }
@@ -555,7 +567,7 @@ class Simulation {
           y = lessonTarget(x, s, t, m.kind, sn.u);
           w = (m.kind === 'close' ? 0.3 : 0.6) * (0.5 + 0.5 * sn.u);
         }
-        this.memory.push({ x, y, w });
+        if (y) this.memory.push({ x, y, w });
       }
       this._newMistakes.push(m);
       done++;
@@ -577,22 +589,26 @@ class Simulation {
     let best = null, bestScore = -Infinity;
     for (const gs of REPLAY_GAS) {
       for (const ss of REPLAY_STEER) {
-        const sc = this.imagine(start, idx0, time0, ss, gs, near);
+        const sc = this.imagine(start, idx0, time0, ss, gs, near, 30);
         if (sc > bestScore) { bestScore = sc; best = [ss, gs]; }
       }
     }
+    // Stopping and waiting is a real option too: it wins whenever every way
+    // of carrying on would have ended in an accident.
+    const stop = this.imagine(start, idx0, time0, 0, -1, near, 84);
+    if (stop > bestScore) { bestScore = stop; best = [0, -1]; }
     return bestScore > -500 ? best : null;
   }
 
   // Simulate 1.4 s from a saved moment: hold one choice for 0.5 s, then drive
   // calmly along the road. Score = progress + clearance kept; a crash scores low.
-  imagine(start, idx0, time0, steerT, gasT, near) {
+  imagine(start, idx0, time0, steerT, gasT, near, hold) {
     const tr = this.track, P = this.params, N = tr.N, dt = 1 / 60, st = this._ghost;
     st.x = start.x; st.y = start.y; st.h = start.h; st.vx = start.vx; st.vy = start.vy; st.speed = start.speed; st.steer = start.steer;
     let idx = idx0, prog = 0, minGap = 20, off = 0;
     for (let k = 0; k < 84; k++) {
       let sT = steerT, gT = gasT;
-      if (k >= 30) {
+      if (k >= hold) {
         const la = (idx + 6) % N;
         sT = clamp(2.2 * Math.sin(wrapAngle(tr.ang[la] - st.h)) - 0.02 * off, -1, 1);
         gT = 0.3;
@@ -648,7 +664,7 @@ class Simulation {
       for (const f of fresh) if (c.learnedFrom.length < 3 && f.kind !== 'close') c.learnedFrom.push(`car ${f.car} (${f.cause})`);
       if (c.t - c.lastLearnLog >= 1.5) {
         const from = c.learnedFrom.length ? `: ${c.learnedFrom.join(', ')}${c.lessonsPending > c.learnedFrom.length ? '…' : ''}` : ' (close calls)';
-        c.logEvent('learn', `Learned from ${c.lessonsPending} mistake${c.lessonsPending === 1 ? '' : 's'}${from}`);
+        c.logEvent('learn', `Learned from ${c.lessonsPending} lesson${c.lessonsPending === 1 ? '' : 's'}${from}`);
         c.lastLearnLog = c.t; c.lessonsPending = 0; c.learnedFrom = [];
       }
       taught++;
@@ -800,6 +816,35 @@ class Simulation {
         if (dist - o.r < closeGap) { closeGap = dist - o.r; closeKind = o.type; }
       }
     }
+    // --- Waiting for a moving hazard in its path pauses the stall timer.
+    let hazard = null, hazardAhead = Infinity;
+    for (let k = 0; k < near.length; k++) {
+      const o = near[k];
+      if (o.type !== 'ped' && o.type !== 'traffic') continue;
+      const dx = o.x - car.x, dy = o.y - car.y;
+      const ahead = dx * c + dy * s, side = Math.abs(-dx * s + dy * c);
+      const lane = o.r + CAR_W / 2 + (o.type === 'ped' ? 30 : 8);   // pedestrians may be about to step into the path
+      if (ahead > 0 && ahead < WAIT_LOOK && side < lane && ahead < hazardAhead) { hazard = o; hazardAhead = ahead; }
+    }
+    if (hazard && car.speed < WAIT_SPEED) {
+      car.waitStreak += dt; car.waitTotal += dt;
+      if (car.waitStreak < WAIT_PATIENCE) car.lastGain = car.t;       // waiting is not stalling
+      if (!car.waitingFor) {
+        car.waitingFor = hazard.type === 'ped' ? 'a pedestrian' : 'the car ahead';
+        car.waitIdx = car.progress;
+        car.logEvent('info', `Slowed to wait for ${car.waitingFor}`);
+      }
+    } else {
+      car.waitStreak = 0;
+    }
+    if (car.waitingFor && car.progress > car.waitIdx + 8) {          // got past without an accident
+      car.yields++;
+      this.safeWaitsThisGen++;
+      car.logEvent('good', `Waited for ${car.waitingFor}, then passed safely`);
+      this.recordMistake(car, 'good', `waited for ${car.waitingFor}`);
+      car.waitingFor = null;
+    }
+
     if (closeKind && !car.ccActive) {
       car.logEvent('warn', `Close call with ${CLOSE_LABEL[closeKind]} (${Math.max(0, closeGap).toFixed(0)}px)`);
       this.recordMistake(car, 'close', `close call with ${CLOSE_LABEL[closeKind]}`);
@@ -818,9 +863,9 @@ class Simulation {
 
     // --- Rules of the exam
     if (car.progress < car.maxProgress - 30) return this.kill(car, 'wrong-way', 'drove the wrong way', 'other');
-    if (car.t - car.lastGain > 5) return this.kill(car, 'stalled', 'stalled', 'other');
+    if (car.t - car.lastGain > 5) return this.kill(car, 'stalled', car.waitStreak >= WAIT_PATIENCE ? 'waited too long' : 'stalled', 'other');
     // Cars that never really set off only clutter the start line.
-    if (car.t > 2.5 && car.maxProgress - START_IDX < 3) return this.kill(car, 'stalled', 'never got going', 'other');
+    if (car.t > 2.5 && car.maxProgress - START_IDX < 3 && !car.waitingFor) return this.kill(car, 'stalled', 'never got going', 'other');
     if (car.progress >= START_IDX + N * P.laps) {
       car.finishTime = car.t;
       this.finishedCount++;
@@ -843,7 +888,7 @@ class Simulation {
     }
     if (status === 'finished') car.logEvent('good', `Finished the lap in ${car.t.toFixed(1)}s`);
     else if (status === 'crashed') car.logEvent('bad', `Crashed: ${cause}`);
-    else car.logEvent('bad', status === 'stalled' ? (cause === 'never got going' ? 'Never got going' : 'Stalled: no progress for 5s') : status === 'wrong-way' ? 'Turned around and drove the wrong way' : 'Ran out of time');
+    else car.logEvent('bad', status === 'stalled' ? (cause === 'never got going' ? 'Never got going' : cause === 'waited too long' ? `Waited over ${WAIT_PATIENCE}s without finding a gap` : 'Stalled: no progress for 5s, with nothing to wait for') : status === 'wrong-way' ? 'Turned around and drove the wrong way' : 'Ran out of time');
     this.scoreCar(car);
   }
 
@@ -859,10 +904,12 @@ class Simulation {
     car.completion = completion;
     car.penalty = penalty;
     car.safety = 100 * completion * penalty * mul;
-    let fit = dist;
+    // Each safe wait (slowing for a pedestrian or car, then getting past
+    // without an accident) earns a bonus, so evolution favours cars that yield.
+    let fit = dist + car.yields * YIELD_BONUS;
     if (car.status === 'finished') fit += target * (0.5 + 0.15 * (1 - car.finishTime / this.timeLimit));
-    // Stopping forever in front of a hazard is no better than hitting it —
-    // otherwise "park and wait" becomes a trap evolution can't escape.
+    // Stopping with nothing to wait for (or waiting past all patience) still
+    // counts as a failure; otherwise "park forever" becomes a trap.
     const fail = car.status === 'crashed' || car.status === 'wrong-way' || car.status === 'stalled';
     car.fitness = fit * penalty * penalty * (fail ? 0.5 : 1);
   }
@@ -887,7 +934,7 @@ class Simulation {
     this.bestSafetyOnLevel = Math.max(this.bestSafetyOnLevel, bestSafety);
     this.history.push({
       gen: this.generation, level: this.level, best: bestSafety, avg: avgSafety,
-      finished: this.finishedCount, crashes, pop: cars.length, outcomes,
+      finished: this.finishedCount, crashes, pop: cars.length, outcomes, safeWaits: this.safeWaitsThisGen,
     });
     if (this.history.length > 2000) this.history.shift();
 

@@ -232,7 +232,7 @@ function refreshPanel(full) {
   lc.textContent = sim.learnOn ? 'Learning' : 'Off';
   $('learnStats').innerHTML =
     gauge('Mistakes this generation', sim.mistakesThisGen) +
-    gauge('Lessons taught this generation', sim.lessonsThisGen.toLocaleString()) +
+    gauge('Safe waits this generation', sim.safeWaitsThisGen) +
     gauge('Lessons remembered', sim.memory.length);
   $('lvl').textContent = sim.level;
   for (const f of FACTORS) {
@@ -333,14 +333,13 @@ function refreshMonitor(force) {
     : `${STATUS_TEXT[c.status]}${c.status === 'crashed' ? ` (${c.cause.replace(/^hit (the |a |an |another )?/, '')})` : ''}`;
   $('monHint').hidden = !!picked;
   $('btnFollowLeader').hidden = !picked;
-  const clr = c.alive && Number.isFinite(c.clearance) ? `${Math.round(c.clearance)} px` : '–';
   $('monGauges').innerHTML =
     gauge(c.status === 'crashed' ? 'Impact speed' : c.alive ? 'Speed' : 'Final speed', `${Math.round(c.speed)} <small>px/s</small>`) +
     gauge('Lap done', `${lapPct(c).toFixed(0)}%`) +
     gauge('Safety so far', sim.liveSafety(c).toFixed(0)) +
     gauge('Close calls', `${c.nearMiss.toFixed(1)}s`) +
     gauge('Lessons learned', c.lessons) +
-    gauge('Nearest thing', clr);
+    gauge(c.alive && c.waitingFor ? 'Waiting now' : 'Safe waits', c.alive && c.waitingFor ? `${c.waitStreak.toFixed(1)}s` : c.yields);
   setBar('barSteer', c.steer);
   $('valSteer').textContent = Math.abs(c.steer) < 0.05 ? 'straight' : `${Math.round(Math.abs(c.steer) * 100)}% ${c.steer < 0 ? 'left' : 'right'}`;
   setBar('barGas', c.throttle);

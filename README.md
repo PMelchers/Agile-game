@@ -71,6 +71,26 @@ safety = 100 × completion × exp(−(0.18·closeCalls + 0.01·harshSteering)) �
 - **outcome:** 1 for finishing, 0.85 for running out of time, 0.7 for
   stalling, 0.5 for crashing or driving the wrong way.
 
+### Waiting is allowed (and rewarded)
+
+Stopping for a pedestrian who is crossing, or slowing behind a car, is good
+driving, not stalling:
+
+- When a pedestrian or car is within 150px ahead in the car's path and the
+  car is slower than 45 px/s, it is **waiting**: the stall timer pauses, for
+  up to 15 seconds of patience.
+- If the car then gets past without an accident, that's a **safe wait**. It
+  earns a fitness bonus, so evolution favours cars that yield, and the
+  moments leading up to it become a lesson every car learns from.
+- Mistake replays include "stop and wait" as a choice, so when every way of
+  carrying on would have crashed, the lesson is to wait.
+- Stopping with nothing moving to wait for (static cones never move) still
+  counts as stalling after 5 seconds, and so does waiting past the 15-second
+  patience.
+
+The Monitor tab shows each car's safe waits (or how long it has been waiting
+right now), and the Train tab counts safe waits per generation.
+
 Fitness, which evolution optimises, uses the same terms, so the cars that
 survive are the ones that drive safely.
 
